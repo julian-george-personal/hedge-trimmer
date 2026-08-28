@@ -1,6 +1,7 @@
 const TEAM_COLORS = ["#4f8cff", "#e0a63f", "#3fbf7f", "#e0555a"];
 
 const VOLUME_SLIDER_STEPS = 1000;
+const VOLUME_SLIDER_MIDPOINT = 100_000;
 
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 560;
@@ -8,11 +9,18 @@ const SIDEBAR_MAX_WIDTH = 560;
 // How many matches the sidebar renders at once; "Load more" reveals the next page.
 const MARKETS_PAGE_SIZE = 25;
 
+// Default chart zoom: prefer starting 30min before the PandaScore match
+// start (when we found one); otherwise fall back to the last 3h before the
+// market settled.
+const DEFAULT_ZOOM_MATCH_START_LEAD_SECONDS = 30 * 60;
+const DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS = 3 * 60 * 60;
+
 const state = {
   events: [],
   activeIndex: -1,
   selectedTicker: null,
   chart: null,
+  matchStartAt: null,
   maxVolume: 0,
   visibleCount: MARKETS_PAGE_SIZE,
 };
@@ -33,11 +41,23 @@ function formatVolume(volume) {
   return String(Math.round(volume));
 }
 
-// Logarithmic mapping so the slider gives fine control over the (heavily
-// right-skewed) low end of the volume distribution, not just the top end.
+// Two-segment exponential mapping, anchored so VOLUME_SLIDER_MIDPOINT sits at
+// the slider's midpoint: the bottom half sweeps 0 -> midpoint, the top half
+// sweeps midpoint -> max. This gives fine control around the (heavily
+// right-skewed) bulk of the distribution instead of cramming it into a
+// sliver of the range.
 function sliderPositionToVolume(position) {
   if (position <= 0 || state.maxVolume <= 0) return 0;
-  return Math.pow(state.maxVolume, position / VOLUME_SLIDER_STEPS);
+  if (position >= VOLUME_SLIDER_STEPS) return state.maxVolume;
+
+  const half = VOLUME_SLIDER_STEPS / 2;
+  const midVolume = Math.min(VOLUME_SLIDER_MIDPOINT, state.maxVolume);
+
+  if (position <= half) {
+    const floor = 1;
+    return floor * Math.pow(midVolume / floor, position / half);
+  }
+  return midVolume * Math.pow(state.maxVolume / midVolume, (position - half) / half);
 }
 
 function currentMinVolume() {
@@ -203,16 +223,101 @@ function renderMatchHeader(event) {
     )
     .join("");
 
-  const matchStart = event.match_start
-    ? `<div class="match-start">Match start: ${formatDateLabel(event.match_start)} ${new Date(event.match_start).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</div>`
-    : "";
-
   document.getElementById("match-header").innerHTML = `
     <h1>${event.title}</h1>
     <div class="match-id">${event.event_ticker}</div>
-    ${matchStart}
+    <div id="match-start" class="match-start"></div>
     <div class="teams">${teamStats}</div>
   `;
+}
+
+function formatMatchStart(beginAt) {
+  return new Date(beginAt).toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+async function loadMatchStart(event) {
+  const el = document.getElementById("match-start");
+  el.textContent = "";
+  try {
+    const params = new URLSearchParams({ close_time: event.close_time });
+    event.markets.forEach((m) => params.append("team", m.team_name));
+    const { begin_at } = await fetchJson(`/api/match-start?${params}`);
+    if (state.selectedTicker !== event.event_ticker) return; // user moved on
+    el.textContent = begin_at ? `Match start: ${formatMatchStart(begin_at)}` : "";
+    state.matchStartAt = begin_at;
+    updateMatchStartLine();
+  } catch {
+    if (state.selectedTicker !== event.event_ticker) return;
+    el.textContent = "";
+  }
+}
+
+// Positions a vertical dotted line over the chart at the match's PandaScore
+// begin_at. Runs on data load, resize, and pan/zoom (timeToCoordinate is a
+// screen-space pixel offset, so it's stale after any of those).
+function updateMatchStartLine() {
+  const container = document.getElementById("chart-overlay");
+  let line = document.getElementById("match-start-line");
+  let label = document.getElementById("match-start-label");
+
+  if (!state.chart || !state.matchStartAt) {
+    line?.remove();
+    label?.remove();
+    return;
+  }
+
+  // timeToCoordinate only resolves times that exactly match a data point, so
+  // interpolate linearly across the visible range's endpoints (which always
+  // resolve, being real bar times) rather than querying the target directly.
+  const timeScale = state.chart.timeScale();
+  const time = Math.floor(new Date(state.matchStartAt).getTime() / 1000);
+  const range = timeScale.getVisibleRange();
+  if (!range || time < range.from || time > range.to) {
+    line?.remove();
+    label?.remove();
+    return;
+  }
+  const x0 = timeScale.timeToCoordinate(range.from);
+  const x1 = timeScale.timeToCoordinate(range.to);
+  const x = x0 + ((time - range.from) / (range.to - range.from)) * (x1 - x0);
+
+  if (!line) {
+    line = document.createElement("div");
+    line.id = "match-start-line";
+    container.appendChild(line);
+  }
+  line.style.left = `${x}px`;
+
+  if (!label) {
+    label = document.createElement("div");
+    label.id = "match-start-label";
+    label.textContent = "Match Start";
+    container.appendChild(label);
+  }
+  label.style.left = `${x}px`;
+}
+
+// Left edge of the default chart view: 30min before the match's PandaScore
+// start when we found one, else DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS before
+// the market settled. Clamped to the earliest candle so short-lived markets
+// don't render mostly-empty.
+function defaultZoomRange(event, candlesByMarket) {
+  const allTimes = candlesByMarket.flat().map((c) => c.t);
+  if (allTimes.length === 0) return null;
+  const dataFrom = Math.min(...allTimes);
+  const dataTo = Math.max(...allTimes);
+
+  const from = state.matchStartAt
+    ? Math.floor(new Date(state.matchStartAt).getTime() / 1000) - DEFAULT_ZOOM_MATCH_START_LEAD_SECONDS
+    : Math.floor(new Date(event.close_time).getTime() / 1000) - DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS;
+
+  return { from: Math.max(from, dataFrom), to: dataTo };
 }
 
 function midPriceSeries(candles) {
@@ -233,28 +338,9 @@ function totalVolumeSeries(candlesByMarket) {
     .map(([time, value]) => ({ time, value }));
 }
 
-function setupMatchStartLine(chartEl, timeSec) {
-  const lineEl = document.createElement("div");
-  lineEl.className = "match-start-line";
-  chartEl.appendChild(lineEl);
-  state.matchStartLineEl = lineEl;
-
-  const update = () => {
-    const x = state.chart?.timeScale().timeToCoordinate(timeSec);
-    lineEl.style.display = x == null ? "none" : "block";
-    if (x != null) lineEl.style.left = `${x}px`;
-  };
-  state.updateMatchStartLine = update;
-  state.chart.timeScale().subscribeVisibleLogicalRangeChange(update);
-  update();
-}
-
-async function renderChart(event) {
+async function renderChart(event, matchStartPromise) {
   const chartEl = document.getElementById("chart");
   state.chart?.remove();
-  state.matchStartLineEl?.remove();
-  state.matchStartLineEl = null;
-  state.updateMatchStartLine = null;
   state.chart = LightweightCharts.createChart(chartEl, {
     width: chartEl.clientWidth,
     height: chartEl.clientHeight,
@@ -273,8 +359,6 @@ async function renderChart(event) {
     event.markets.map((market) => fetchJson(`/api/candles?ticker=${encodeURIComponent(market.ticker)}`))
   );
 
-  const matchStartTs = event.match_start ? Date.parse(event.match_start) / 1000 : null;
-
   event.markets.forEach((market, i) => {
     const series = state.chart.addLineSeries({
       color: TEAM_COLORS[i],
@@ -283,14 +367,6 @@ async function renderChart(event) {
     });
     series.setData(midPriceSeries(candlesByMarket[i]));
   });
-
-  const firstMarketCandles = candlesByMarket[0] || [];
-  if (matchStartTs !== null && firstMarketCandles.length > 0) {
-    const closestTs = firstMarketCandles.reduce((closest, c) =>
-      Math.abs(c.t - matchStartTs) < Math.abs(closest - matchStartTs) ? c.t : closest
-    , firstMarketCandles[0].t);
-    setupMatchStartLine(chartEl, closestTs);
-  }
 
   const volumeSeries = state.chart.addHistogramSeries({
     color: "#4f8cff",
@@ -302,7 +378,17 @@ async function renderChart(event) {
   });
   volumeSeries.setData(totalVolumeSeries(candlesByMarket));
 
-  state.chart.timeScale().fitContent();
+  await matchStartPromise; // resolves state.matchStartAt (or leaves it null)
+  if (state.selectedTicker !== event.event_ticker) return; // user moved on
+
+  const zoom = defaultZoomRange(event, candlesByMarket);
+  if (zoom) {
+    state.chart.timeScale().setVisibleRange(zoom);
+  } else {
+    state.chart.timeScale().fitContent();
+  }
+  state.chart.timeScale().subscribeVisibleLogicalRangeChange(updateMatchStartLine);
+  updateMatchStartLine();
 }
 
 async function selectEvent(event) {
@@ -314,10 +400,14 @@ async function selectEvent(event) {
   document.getElementById("empty-state").hidden = true;
   document.getElementById("match-detail").hidden = false;
 
+  state.matchStartAt = null;
   renderMatchHeader(event);
+  const matchStartPromise = loadMatchStart(event);
   if (event.has_candles) {
-    await renderChart(event);
+    await renderChart(event, matchStartPromise);
   } else {
+    state.chart?.remove();
+    state.chart = null;
     document.getElementById("chart").innerHTML =
       '<div style="color: var(--text-dim); padding: 20px;">No candlestick data ingested for this match.</div>';
   }
@@ -376,7 +466,7 @@ function setupChartResize() {
   const chartEl = document.getElementById("chart");
   new ResizeObserver(() => {
     state.chart?.resize(chartEl.clientWidth, chartEl.clientHeight);
-    state.updateMatchStartLine?.();
+    updateMatchStartLine();
   }).observe(chartEl);
 }
 

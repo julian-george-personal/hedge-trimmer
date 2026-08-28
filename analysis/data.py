@@ -3,6 +3,7 @@ import math
 import duckdb
 
 DATA_ROOT = "s3://hedge-trimmer-juliangeorge/kalshi"
+PANDASCORE_DATA_ROOT = "s3://hedge-trimmer-juliangeorge/pandascore"
 
 _CONNECTION: duckdb.DuckDBPyConnection | None = None
 
@@ -46,7 +47,7 @@ def list_markets() -> list[dict]:
         f"""
         SELECT
             ticker, event_ticker, series, title, yes_sub_title, no_sub_title,
-            status, result, open_time, close_time, settlement_ts, occurrence_datetime,
+            status, result, open_time, close_time, settlement_ts,
             {dollar_casts}, {numeric_casts}
         FROM read_parquet('{DATA_ROOT}/markets/*/markets.parquet', hive_partitioning = true)
         ORDER BY close_time DESC
@@ -68,7 +69,6 @@ def list_events() -> list[dict]:
                 "event_ticker": market["event_ticker"],
                 "series": market["series"],
                 "close_time": market["close_time"],
-                "match_start": market["occurrence_datetime"],
                 "status": market["status"],
                 "markets": [],
             },
@@ -88,6 +88,7 @@ def list_events() -> list[dict]:
         event["title"] = " vs ".join(m["team_name"] for m in event["markets"])
         event["has_candles"] = any(m["has_candles"] for m in event["markets"])
         event["volume"] = sum(m["volume"] for m in event["markets"])
+    events_list = [event for event in events_list if event["volume"] > 0]
     events_list.sort(key=lambda e: e["close_time"], reverse=True)
     return events_list
 
@@ -119,3 +120,7 @@ def get_candles(ticker: str) -> list[dict]:
         )
     except duckdb.IOException:
         return []
+
+
+def list_pandascore_matches() -> list[dict]:
+    return _records(f"SELECT * FROM read_parquet('{PANDASCORE_DATA_ROOT}/matches.parquet')")

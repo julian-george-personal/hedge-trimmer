@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 DEFAULT_DATA_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "raw" / "kalshi")
+DEFAULT_PANDASCORE_DATA_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "raw" / "pandascore")
 
 
 def _is_local(data_root: str) -> bool:
@@ -23,3 +24,7 @@ def write_markets(markets: list[dict], series_ticker: str, data_root: str = DEFA
 
 def write_candles(candles: list[dict], ticker: str, data_root: str = DEFAULT_DATA_ROOT) -> str:
     return _write_parquet(candles, data_root, "candles", f"ticker={ticker}", "candles.parquet")
+
+
+def write_pandascore_matches(matches: list[dict], data_root: str = DEFAULT_PANDASCORE_DATA_ROOT) -> str:
+    return _write_parquet(matches, data_root, "matches.parquet")

@@ -1,2 +1,5 @@
 [kalshi]
 request_delay_seconds = 0.1
+
+[pandascore]
+request_delay_seconds = 0.5

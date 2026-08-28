@@ -391,18 +391,45 @@ body {
 .team-stat .outcome.yes { background: rgba(63, 191, 127, 0.15); color: var(--yes); }
 .team-stat .outcome.no { background: rgba(224, 85, 90, 0.15); color: var(--no); }
 
-#chart {
+#chart-container {
   flex: 1;
   min-height: 0;
   position: relative;
 }
 
-.match-start-line {
+#chart {
+  position: absolute;
+  inset: 0;
+}
+
+/* Sibling of #chart, not a descendant, positioned to exactly cover it.
+   lightweight-charts' own canvas layers carry an explicit z-index, which
+   beats a plain later-in-DOM sibling regardless of DOM order — z-index
+   here has to be explicit too, or the canvas paints over this. */
+#chart-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+#match-start-line {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 0;
-  border-left: 1px dotted rgba(255, 255, 255, 0.7);
-  pointer-events: none;
-  z-index: 2;
+  border-left: 1px dotted rgba(255, 255, 255, 0.8);
+}
+
+#match-start-label {
+  position: absolute;
+  top: 6px;
+  transform: translateX(6px);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.12);
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
 }
