@@ -2,55 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta http-equiv="refresh" content="0; url=/explorer.html" />
 <title>hedge trimmer</title>
-<link rel="stylesheet" href="/style.css" />
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
-  <div id="app">
-    <aside id="sidebar">
-      <div id="search-bar">
-        <input id="search" type="text" autocomplete="off" placeholder="Filter matches…" />
-        <div id="date-filter">
-          <label>Date range</label>
-          <div class="date-inputs">
-            <input id="date-from" type="date" aria-label="From date" />
-            <span class="date-sep">–</span>
-            <input id="date-to" type="date" aria-label="To date" />
-          </div>
-          <div class="date-presets">
-            <button type="button" data-preset="today">Today</button>
-            <button type="button" data-preset="week">This week</button>
-            <button type="button" data-preset="month">This month</button>
-            <button type="button" data-preset="all">All</button>
-          </div>
-        </div>
-        <div id="volume-filter">
-          <label for="min-volume">Min volume: <span id="min-volume-label">0</span></label>
-          <input id="min-volume" type="range" min="0" max="1000" value="0" step="1" />
-        </div>
-      </div>
-      <div id="market-list">
-        <div id="list-loading"><span class="spinner"></span>Loading matches…</div>
-      </div>
-      <div id="list-footer">
-        <span id="list-count"></span>
-        <button id="load-more" type="button" hidden>Load more</button>
-      </div>
-    </aside>
-    <div id="sidebar-resize-handle"></div>
-    <button id="sidebar-toggle" title="Toggle sidebar" aria-label="Hide sidebar">&lsaquo;</button>
-    <main id="detail">
-      <div id="empty-state">Select a match to view team share prices over time.</div>
-      <div id="match-detail" hidden>
-        <header id="match-header"></header>
-        <div id="chart-container">
-          <div id="chart"></div>
-          <div id="chart-overlay"></div>
-        </div>
-      </div>
-    </main>
-  </div>
-  <script src="/app.js"></script>
+  <p><a href="/explorer.html">Continue to explorer</a></p>
 </body>
 </html>

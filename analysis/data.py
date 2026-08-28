@@ -124,3 +124,33 @@ def get_candles(ticker: str) -> list[dict]:
 
 def list_pandascore_matches() -> list[dict]:
     return _records(f"SELECT * FROM read_parquet('{PANDASCORE_DATA_ROOT}/matches.parquet')")
+
+
+_candle_price_series_cache: dict[str, list[dict]] | None = None
+
+
+def candle_price_series() -> dict[str, list[dict]]:
+    """Mid price (yes_bid/yes_ask midpoint) and volume time series for every
+    ticker with candle data, keyed by ticker and sorted by time. Reads every
+    candles parquet file in one glob query (~70s cold) since that's
+    dramatically faster than one S3 read per ticker; cached in memory for the
+    process lifetime, same operational model as the pandascore match-start
+    index."""
+    global _candle_price_series_cache
+    if _candle_price_series_cache is None:
+        rows = _records(
+            f"""
+            SELECT
+                ticker,
+                end_period_ts AS t,
+                (TRY_CAST("yes_bid.close_dollars" AS DOUBLE) + TRY_CAST("yes_ask.close_dollars" AS DOUBLE)) / 2 AS price,
+                TRY_CAST(volume_fp AS DOUBLE) AS volume
+            FROM read_parquet('{DATA_ROOT}/candles/*/candles.parquet', hive_partitioning = true)
+            ORDER BY ticker, t
+            """
+        )
+        series: dict[str, list[dict]] = {}
+        for row in rows:
+            series.setdefault(row["ticker"], []).append({"t": row["t"], "price": row["price"], "volume": row["volume"] or 0})
+        _candle_price_series_cache = series
+    return _candle_price_series_cache

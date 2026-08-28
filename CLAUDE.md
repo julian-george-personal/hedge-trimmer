@@ -43,7 +43,7 @@ const { chromium } = require('playwright');
 (async () => {
   const browser = await chromium.launch({ args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  await page.goto('http://127.0.0.1:8420', { waitUntil: 'networkidle' });
+  await page.goto('http://127.0.0.1:8420/explorer.html', { waitUntil: 'networkidle' });
   await page.waitForSelector('#empty-state');
   await page.screenshot({ path: 'out.png' });
   await browser.close();
@@ -61,13 +61,21 @@ are blocked otherwise.
 
 ## Frontend structure
 
-Static UI lives in `analysis/static/` (`index.html`, `app.js`, `style.css`),
-served by `analysis/server.py`. No build step — edit and reload.
+Static UI lives in `analysis/static/`, served by `analysis/server.py`. No
+build step — edit and reload. There are two pages, sharing `base.css` (CSS
+vars, body reset, top nav bar) and switchable via the nav links each renders:
 
-Watch out for the `hidden` attribute: `app.js` toggles it via the `.hidden`
-IDL property (e.g. `el.hidden = true`), which relies on the low-specificity
-UA rule `[hidden] { display: none }`. Any `#id { display: ... }` rule in
-`style.css` for that same element will silently win over it and keep the
-element (and its layout footprint) visible. If adding `display` rules for an
-element that also gets toggled via `.hidden`, pair it with an explicit
-`#id[hidden] { display: none; }` override.
+- `explorer.html` / `explorer.js` / `explorer.css` — the match explorer
+  (sidebar list + chart), the original single-page UI.
+- `analysis.html` / `analysis.js` / `analysis.css` — ad hoc analysis
+  widgets, currently a placeholder.
+
+`index.html` is just a redirect to `/explorer.html` for the bare root URL.
+
+Watch out for the `hidden` attribute: `explorer.js` toggles it via the
+`.hidden` IDL property (e.g. `el.hidden = true`), which relies on the
+low-specificity UA rule `[hidden] { display: none }`. Any `#id { display:
+... }` rule in `explorer.css` for that same element will silently win over
+it and keep the element (and its layout footprint) visible. If adding
+`display` rules for an element that also gets toggled via `.hidden`, pair it
+with an explicit `#id[hidden] { display: none; }` override.

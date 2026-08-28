@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analysis.data import get_candles, list_events
 from analysis.pandascore import find_match_start
+from analysis.price_spike import list_price_spike_stats
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PORT = 8420
@@ -25,6 +26,8 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             event = {"close_time": query.get("close_time", [""])[0], "markets": [{"team_name": t} for t in query.get("team", [])]}
             self._send_json({"begin_at": find_match_start(event)})
+        elif parsed.path == "/api/price-spike-stats":
+            self._send_json(list_price_spike_stats())
         else:
             self._send_static(parsed.path)
 

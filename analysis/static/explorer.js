@@ -1,5 +1,10 @@
 const TEAM_COLORS = ["#4f8cff", "#e0a63f", "#3fbf7f", "#e0555a"];
 
+// Favorite (higher win probability) is always blue, underdog always orange —
+// see pickTeamColors.
+const OVERDOG_COLOR = TEAM_COLORS[0];
+const UNDERDOG_COLOR = TEAM_COLORS[1];
+
 const VOLUME_SLIDER_STEPS = 1000;
 const VOLUME_SLIDER_MIDPOINT = 100_000;
 
@@ -10,10 +15,10 @@ const SIDEBAR_MAX_WIDTH = 560;
 const MARKETS_PAGE_SIZE = 25;
 
 // Default chart zoom: prefer starting 30min before the PandaScore match
-// start (when we found one); otherwise fall back to the last 3h before the
+// start (when we found one); otherwise fall back to the last 2h before the
 // market settled.
 const DEFAULT_ZOOM_MATCH_START_LEAD_SECONDS = 30 * 60;
-const DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS = 3 * 60 * 60;
+const DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS = 2 * 60 * 60;
 
 const state = {
   events: [],
@@ -304,9 +309,8 @@ function updateMatchStartLine() {
 }
 
 // Left edge of the default chart view: 30min before the match's PandaScore
-// start when we found one, else DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS before
-// the market settled. Clamped to the earliest candle so short-lived markets
-// don't render mostly-empty.
+// start when we found one, else 2h before the market settled. Clamped to
+// the earliest candle so short-lived markets don't render mostly-empty.
 function defaultZoomRange(event, candlesByMarket) {
   const allTimes = candlesByMarket.flat().map((c) => c.t);
   if (allTimes.length === 0) return null;
@@ -325,6 +329,49 @@ function midPriceSeries(candles) {
     time: c.t,
     value: (c.yes_bid_close + c.yes_ask_close) / 2,
   }));
+}
+
+// Reference time for judging favorite vs. underdog: the match's actual
+// PandaScore start when known, else 2h before the market closed (mirrors the
+// chart's default-zoom fallback).
+function oddsReferenceTime(event) {
+  return state.matchStartAt
+    ? Math.floor(new Date(state.matchStartAt).getTime() / 1000)
+    : Math.floor(new Date(event.close_time).getTime() / 1000) - DEFAULT_ZOOM_FALLBACK_WINDOW_SECONDS;
+}
+
+// Mid price of the candle at or immediately before targetSeconds (candles
+// are ordered ascending by time), falling back to the earliest candle if
+// targetSeconds precedes all of them.
+function priceAt(candles, targetSeconds) {
+  if (candles.length === 0) return null;
+  let chosen = candles[0];
+  for (const c of candles) {
+    if (c.t > targetSeconds) break;
+    chosen = c;
+  }
+  return (chosen.yes_bid_close + chosen.yes_ask_close) / 2;
+}
+
+// Colors line series (and header swatches) by favorite/underdog rather than
+// market order: whichever team has the higher win probability at match start
+// (or 2h-before-close, if we never found a match start) is blue, the other
+// orange. Falls back to the fixed palette when there aren't exactly two
+// markets to compare, or the reference prices are missing/tied.
+function pickTeamColors(event, candlesByMarket) {
+  if (event.markets.length !== 2) return TEAM_COLORS;
+
+  const refTime = oddsReferenceTime(event);
+  const [priceA, priceB] = candlesByMarket.map((candles) => priceAt(candles, refTime));
+  if (priceA == null || priceB == null || priceA === priceB) return TEAM_COLORS;
+
+  return priceA > priceB ? [OVERDOG_COLOR, UNDERDOG_COLOR] : [UNDERDOG_COLOR, OVERDOG_COLOR];
+}
+
+function applyTeamSwatchColors(colors) {
+  document.querySelectorAll("#match-header .team-stat .swatch").forEach((swatch, i) => {
+    swatch.style.background = colors[i];
+  });
 }
 
 // Combined volume across all of an event's markets, bucketed by candle time.
@@ -359,9 +406,15 @@ async function renderChart(event, matchStartPromise) {
     event.markets.map((market) => fetchJson(`/api/candles?ticker=${encodeURIComponent(market.ticker)}`))
   );
 
+  await matchStartPromise; // resolves state.matchStartAt (or leaves it null)
+  if (state.selectedTicker !== event.event_ticker) return; // user moved on
+
+  const teamColors = pickTeamColors(event, candlesByMarket);
+  applyTeamSwatchColors(teamColors);
+
   event.markets.forEach((market, i) => {
     const series = state.chart.addLineSeries({
-      color: TEAM_COLORS[i],
+      color: teamColors[i],
       lineWidth: 2,
       title: market.team_name,
     });
@@ -377,9 +430,6 @@ async function renderChart(event, matchStartPromise) {
     scaleMargins: { top: 0.8, bottom: 0 },
   });
   volumeSeries.setData(totalVolumeSeries(candlesByMarket));
-
-  await matchStartPromise; // resolves state.matchStartAt (or leaves it null)
-  if (state.selectedTicker !== event.event_ticker) return; // user moved on
 
   const zoom = defaultZoomRange(event, candlesByMarket);
   if (zoom) {
