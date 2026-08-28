@@ -1,0 +1,5 @@
+ingestion/credentials/
+ingestion/data/
+ingestion/.venv/
+__pycache__/
+*.pyc
