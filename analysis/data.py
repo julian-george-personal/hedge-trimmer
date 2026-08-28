@@ -69,6 +69,7 @@ def list_events() -> list[dict]:
                 "team_name": market["yes_sub_title"],
                 "result": market["result"],
                 "has_candles": market["has_candles"],
+                "volume": market["volume_fp"] or 0,
             }
         )
 
@@ -76,6 +77,7 @@ def list_events() -> list[dict]:
     for event in events_list:
         event["title"] = " vs ".join(m["team_name"] for m in event["markets"])
         event["has_candles"] = any(m["has_candles"] for m in event["markets"])
+        event["volume"] = sum(m["volume"] for m in event["markets"])
     events_list.sort(key=lambda e: e["close_time"], reverse=True)
     return events_list
 

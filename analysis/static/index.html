@@ -2,18 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Hedge Trimmer — Match Prices</title>
+<title>hedge trimmer</title>
 <link rel="stylesheet" href="/style.css" />
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <div id="app">
-    <div id="search-bar">
-      <input id="search" type="text" autocomplete="off" placeholder="Search ingested matches…" />
-      <div id="suggestions" hidden></div>
-    </div>
+    <aside id="sidebar">
+      <div id="search-bar">
+        <input id="search" type="text" autocomplete="off" placeholder="Filter matches…" />
+        <div id="volume-filter">
+          <label for="min-volume">Min volume: <span id="min-volume-label">0</span></label>
+          <input id="min-volume" type="range" min="0" max="1000" value="0" step="1" />
+        </div>
+      </div>
+      <div id="market-list"></div>
+    </aside>
+    <div id="sidebar-resize-handle"></div>
+    <button id="sidebar-toggle" title="Toggle sidebar" aria-label="Hide sidebar">&lsaquo;</button>
     <main id="detail">
-      <div id="empty-state">Search for a match to view team share prices over time.</div>
+      <div id="empty-state">Select a match to view team share prices over time.</div>
       <div id="match-detail" hidden>
         <header id="match-header"></header>
         <div id="chart"></div>

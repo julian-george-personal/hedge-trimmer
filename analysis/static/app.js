@@ -1,9 +1,16 @@
 const TEAM_COLORS = ["#4f8cff", "#e0a63f", "#3fbf7f", "#e0555a"];
 
+const VOLUME_SLIDER_STEPS = 1000;
+
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 560;
+
 const state = {
   events: [],
   activeIndex: -1,
+  selectedTicker: null,
   chart: null,
+  maxVolume: 0,
 };
 
 async function fetchJson(url) {
@@ -16,38 +23,100 @@ function eventMatchesQuery(event, query) {
   return haystack.includes(query.toLowerCase());
 }
 
-function renderSuggestions(matches) {
-  const container = document.getElementById("suggestions");
-  container.innerHTML = "";
-  container.hidden = matches.length === 0;
-  state.activeIndex = -1;
+function formatVolume(volume) {
+  if (volume >= 1_000_000) return `${(volume / 1_000_000).toFixed(1)}M`;
+  if (volume >= 1_000) return `${(volume / 1_000).toFixed(1)}K`;
+  return String(Math.round(volume));
+}
 
-  matches.forEach((event) => {
-    const row = document.createElement("div");
-    row.className = "suggestion-row" + (event.has_candles ? "" : " no-candles");
-    row.innerHTML = `
-      <div class="title">${event.title}</div>
-      <div class="meta">
-        <span>${event.event_ticker}</span>
-        <span>close: ${event.close_time}</span>
-      </div>
-    `;
-    row.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      selectEvent(event);
-    });
-    container.appendChild(row);
+// Logarithmic mapping so the slider gives fine control over the (heavily
+// right-skewed) low end of the volume distribution, not just the top end.
+function sliderPositionToVolume(position) {
+  if (position <= 0 || state.maxVolume <= 0) return 0;
+  return Math.pow(state.maxVolume, position / VOLUME_SLIDER_STEPS);
+}
+
+function currentMinVolume() {
+  const position = Number(document.getElementById("min-volume").value);
+  return sliderPositionToVolume(position);
+}
+
+function updateMinVolumeLabel() {
+  document.getElementById("min-volume-label").textContent = formatVolume(currentMinVolume());
+}
+
+function formatDateLabel(closeTime) {
+  return new Date(closeTime).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
   });
 }
 
-function handleSearchInput() {
+function groupEventsByDate(events) {
+  const groups = [];
+  let currentLabel = null;
+  let currentGroup = null;
+
+  events.forEach((event) => {
+    const label = formatDateLabel(event.close_time);
+    if (label !== currentLabel) {
+      currentGroup = { label, events: [] };
+      groups.push(currentGroup);
+      currentLabel = label;
+    }
+    currentGroup.events.push(event);
+  });
+
+  return groups;
+}
+
+function buildMarketRow(event) {
+  const row = document.createElement("div");
+  row.className = "suggestion-row" + (event.has_candles ? "" : " no-candles");
+  row.dataset.eventTicker = event.event_ticker;
+  row.classList.toggle("selected", event.event_ticker === state.selectedTicker);
+  row.innerHTML = `
+    <div class="title">${event.title}</div>
+    <div class="meta">
+      <span>${event.event_ticker}</span>
+      <span>vol: ${formatVolume(event.volume)}</span>
+    </div>
+  `;
+  row.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    selectEvent(event);
+  });
+  return row;
+}
+
+function buildDateGroup(group) {
+  const section = document.createElement("div");
+  section.className = "date-group";
+
+  const header = document.createElement("div");
+  header.className = "date-header";
+  header.textContent = group.label;
+  section.appendChild(header);
+
+  group.events.forEach((event) => section.appendChild(buildMarketRow(event)));
+  return section;
+}
+
+function renderMarketList() {
   const query = document.getElementById("search").value.trim();
-  if (!query) {
-    renderSuggestions([]);
-    return;
-  }
-  const matches = state.events.filter((event) => eventMatchesQuery(event, query)).slice(0, 20);
-  renderSuggestions(matches);
+  const minVolume = currentMinVolume();
+  updateMinVolumeLabel();
+  const container = document.getElementById("market-list");
+  container.innerHTML = "";
+  state.activeIndex = -1;
+
+  const matches = state.events.filter(
+    (event) => (!query || eventMatchesQuery(event, query)) && event.volume >= minVolume
+  );
+
+  groupEventsByDate(matches).forEach((group) => container.appendChild(buildDateGroup(group)));
 }
 
 function outcomeBadge(result) {
@@ -116,8 +185,11 @@ async function renderChart(event) {
 }
 
 async function selectEvent(event) {
-  document.getElementById("search").value = event.title;
-  renderSuggestions([]);
+  state.selectedTicker = event.event_ticker;
+  document.querySelectorAll(".suggestion-row").forEach((row) => {
+    row.classList.toggle("selected", row.dataset.eventTicker === event.event_ticker);
+  });
+
   document.getElementById("empty-state").hidden = true;
   document.getElementById("match-detail").hidden = false;
 
@@ -128,6 +200,62 @@ async function selectEvent(event) {
     document.getElementById("chart").innerHTML =
       '<div style="color: var(--text-dim); padding: 20px;">No candlestick data ingested for this match.</div>';
   }
+}
+
+function setSidebarWidth(width) {
+  const clamped = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
+  document.getElementById("app").style.setProperty("--sidebar-width", `${clamped}px`);
+  localStorage.setItem("sidebarWidth", String(clamped));
+}
+
+function setSidebarCollapsed(collapsed) {
+  document.getElementById("app").classList.toggle("sidebar-collapsed", collapsed);
+  const toggle = document.getElementById("sidebar-toggle");
+  toggle.textContent = collapsed ? "›" : "‹";
+  toggle.setAttribute("aria-label", collapsed ? "Show sidebar" : "Hide sidebar");
+  localStorage.setItem("sidebarCollapsed", String(collapsed));
+}
+
+function restoreSidebarState() {
+  const storedWidth = Number(localStorage.getItem("sidebarWidth"));
+  if (storedWidth) setSidebarWidth(storedWidth);
+  setSidebarCollapsed(localStorage.getItem("sidebarCollapsed") === "true");
+}
+
+function setupSidebarToggle() {
+  document.getElementById("sidebar-toggle").addEventListener("click", () => {
+    const collapsed = !document.getElementById("app").classList.contains("sidebar-collapsed");
+    setSidebarCollapsed(collapsed);
+  });
+}
+
+function setupSidebarResize() {
+  const app = document.getElementById("app");
+  const handle = document.getElementById("sidebar-resize-handle");
+
+  handle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    app.classList.add("sidebar-resizing");
+    handle.classList.add("dragging");
+
+    const onMouseMove = (moveEvent) => setSidebarWidth(moveEvent.clientX);
+    const onMouseUp = () => {
+      app.classList.remove("sidebar-resizing");
+      handle.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+}
+
+function setupChartResize() {
+  const chartEl = document.getElementById("chart");
+  new ResizeObserver(() => {
+    state.chart?.resize(chartEl.clientWidth, chartEl.clientHeight);
+  }).observe(chartEl);
 }
 
 function setupKeyboardNav() {
@@ -148,16 +276,21 @@ function setupKeyboardNav() {
       return;
     }
     rows.forEach((row, i) => row.classList.toggle("active", i === state.activeIndex));
+    rows[state.activeIndex].scrollIntoView({ block: "nearest" });
   });
 }
 
 async function init() {
   state.events = await fetchJson("/api/events");
-  document.getElementById("search").addEventListener("input", handleSearchInput);
-  document.getElementById("search").addEventListener("blur", () => {
-    setTimeout(() => renderSuggestions([]), 100);
-  });
+  state.maxVolume = Math.max(0, ...state.events.map((event) => event.volume));
+  renderMarketList();
+  document.getElementById("search").addEventListener("input", renderMarketList);
+  document.getElementById("min-volume").addEventListener("input", renderMarketList);
   setupKeyboardNav();
+  restoreSidebarState();
+  setupSidebarToggle();
+  setupSidebarResize();
+  setupChartResize();
 }
 
 init();

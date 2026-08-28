@@ -6,10 +6,13 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from ingestion.config import load_config
+
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 API_PREFIX = "/trade-api/v2"
 
 CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / "credentials" / "kalshi"
+REQUEST_DELAY_SECONDS = load_config()["kalshi"]["request_delay_seconds"]
 
 
 class KalshiClient:
@@ -47,6 +50,7 @@ class KalshiClient:
     def get(self, path: str, params: dict | None = None) -> dict:
         full_path = API_PREFIX + path
         headers = self._auth_headers("GET", full_path)
+        time.sleep(REQUEST_DELAY_SECONDS)
         resp = self.session.get(self.base_url + path, headers=headers, params=params)
         resp.raise_for_status()
         return resp.json()
