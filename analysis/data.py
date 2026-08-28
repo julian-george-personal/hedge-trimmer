@@ -1,13 +1,24 @@
 import math
-from pathlib import Path
 
 import duckdb
 
-DATA_ROOT = str(Path(__file__).resolve().parent.parent / "ingestion" / "data" / "raw" / "kalshi")
+DATA_ROOT = "s3://hedge-trimmer-juliangeorge/kalshi"
+
+_CONNECTION: duckdb.DuckDBPyConnection | None = None
+
+
+def _connect() -> duckdb.DuckDBPyConnection:
+    global _CONNECTION
+    if _CONNECTION is None:
+        _CONNECTION = duckdb.connect()
+        _CONNECTION.sql("INSTALL httpfs; LOAD httpfs; INSTALL aws; LOAD aws; CALL load_aws_credentials();")
+    return _CONNECTION
 
 
 def _records(query: str) -> list[dict]:
-    df = duckdb.connect().sql(query).df()
+    # ThreadingHTTPServer runs requests concurrently; the shared connection
+    # itself isn't safe for that, but cursor() gives each call its own.
+    df = _connect().cursor().sql(query).df()
     return [
         {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.items()}
         for row in df.to_dict(orient="records")
@@ -24,10 +35,8 @@ _NUMERIC_COLUMNS = ("volume_fp", "open_interest_fp")
 
 
 def _tickers_with_candles() -> set[str]:
-    candles_dir = Path(DATA_ROOT) / "candles"
-    if not candles_dir.exists():
-        return set()
-    return {p.name.removeprefix("ticker=") for p in candles_dir.glob("ticker=*")}
+    paths = _connect().cursor().sql(f"SELECT file FROM glob('{DATA_ROOT}/candles/*/candles.parquet')").df()["file"]
+    return {path.rsplit("/", 2)[-2].removeprefix("ticker=") for path in paths}
 
 
 def list_markets() -> list[dict]:
@@ -37,7 +46,7 @@ def list_markets() -> list[dict]:
         f"""
         SELECT
             ticker, event_ticker, series, title, yes_sub_title, no_sub_title,
-            status, result, open_time, close_time, settlement_ts,
+            status, result, open_time, close_time, settlement_ts, occurrence_datetime,
             {dollar_casts}, {numeric_casts}
         FROM read_parquet('{DATA_ROOT}/markets/*/markets.parquet', hive_partitioning = true)
         ORDER BY close_time DESC
@@ -59,6 +68,7 @@ def list_events() -> list[dict]:
                 "event_ticker": market["event_ticker"],
                 "series": market["series"],
                 "close_time": market["close_time"],
+                "match_start": market["occurrence_datetime"],
                 "status": market["status"],
                 "markets": [],
             },
@@ -83,11 +93,10 @@ def list_events() -> list[dict]:
 
 
 def get_candles(ticker: str) -> list[dict]:
-    candles_path = Path(DATA_ROOT) / "candles" / f"ticker={ticker}" / "candles.parquet"
-    if not candles_path.exists():
-        return []
-    return _records(
-        f"""
+    candles_path = f"{DATA_ROOT}/candles/ticker={ticker}/candles.parquet"
+    try:
+        return _records(
+            f"""
         SELECT
             end_period_ts AS t,
             TRY_CAST(volume_fp AS DOUBLE) AS volume,
@@ -107,4 +116,6 @@ def get_candles(ticker: str) -> list[dict]:
         FROM read_parquet('{candles_path}')
         ORDER BY end_period_ts
         """
-    )
+        )
+    except duckdb.IOException:
+        return []

@@ -26,9 +26,16 @@ def fetch_candlesticks(
 ) -> list[dict]:
     chunk_seconds = MAX_CANDLES_PER_REQUEST * period_interval * 60
     candles = []
+    seen_end_ts = set()
     chunk_start = start_ts
     while chunk_start < end_ts:
         chunk_end = min(chunk_start + chunk_seconds, end_ts)
-        candles.extend(_fetch_candlestick_chunk(client, series_ticker, ticker, chunk_start, chunk_end, period_interval))
+        # Kalshi's start_ts/end_ts bounds are both inclusive, so the candle at
+        # chunk_end is returned again as the first candle of the next chunk.
+        for candle in _fetch_candlestick_chunk(client, series_ticker, ticker, chunk_start, chunk_end, period_interval):
+            if candle["end_period_ts"] in seen_end_ts:
+                continue
+            seen_end_ts.add(candle["end_period_ts"])
+            candles.append(candle)
         chunk_start = chunk_end
     return candles

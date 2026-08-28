@@ -5,12 +5,16 @@ const VOLUME_SLIDER_STEPS = 1000;
 const SIDEBAR_MIN_WIDTH = 220;
 const SIDEBAR_MAX_WIDTH = 560;
 
+// How many matches the sidebar renders at once; "Load more" reveals the next page.
+const MARKETS_PAGE_SIZE = 25;
+
 const state = {
   events: [],
   activeIndex: -1,
   selectedTicker: null,
   chart: null,
   maxVolume: 0,
+  visibleCount: MARKETS_PAGE_SIZE,
 };
 
 async function fetchJson(url) {
@@ -43,6 +47,51 @@ function currentMinVolume() {
 
 function updateMinVolumeLabel() {
   document.getElementById("min-volume-label").textContent = formatVolume(currentMinVolume());
+}
+
+function toDateInputValue(date) {
+  return date.toLocaleDateString("en-CA"); // yyyy-mm-dd, respects local timezone
+}
+
+function currentDateRange() {
+  const from = document.getElementById("date-from").value;
+  const to = document.getElementById("date-to").value;
+  return { from, to };
+}
+
+function eventInDateRange(event, { from, to }) {
+  const closeTime = new Date(event.close_time).getTime();
+  if (from && closeTime < new Date(`${from}T00:00:00`).getTime()) return false;
+  if (to && closeTime > new Date(`${to}T23:59:59.999`).getTime()) return false;
+  return true;
+}
+
+function applyDatePreset(preset) {
+  const today = new Date();
+  const fromInput = document.getElementById("date-from");
+  const toInput = document.getElementById("date-to");
+
+  if (preset === "all") {
+    fromInput.value = "";
+    toInput.value = "";
+  } else if (preset === "today") {
+    fromInput.value = toDateInputValue(today);
+    toInput.value = toDateInputValue(today);
+  } else if (preset === "week") {
+    const start = new Date(today);
+    start.setDate(start.getDate() - start.getDay());
+    const end = new Date(start);
+    end.setDate(end.getDate() + 6);
+    fromInput.value = toDateInputValue(start);
+    toInput.value = toDateInputValue(end);
+  } else if (preset === "month") {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    fromInput.value = toDateInputValue(start);
+    toInput.value = toDateInputValue(end);
+  }
+
+  renderMarketList();
 }
 
 function formatDateLabel(closeTime) {
@@ -104,19 +153,35 @@ function buildDateGroup(group) {
   return section;
 }
 
-function renderMarketList() {
+function renderMarketList({ resetPaging = true } = {}) {
   const query = document.getElementById("search").value.trim();
   const minVolume = currentMinVolume();
+  const dateRange = currentDateRange();
   updateMinVolumeLabel();
   const container = document.getElementById("market-list");
   container.innerHTML = "";
   state.activeIndex = -1;
+  if (resetPaging) state.visibleCount = MARKETS_PAGE_SIZE;
 
   const matches = state.events.filter(
-    (event) => (!query || eventMatchesQuery(event, query)) && event.volume >= minVolume
+    (event) =>
+      (!query || eventMatchesQuery(event, query)) &&
+      event.volume >= minVolume &&
+      eventInDateRange(event, dateRange)
   );
 
-  groupEventsByDate(matches).forEach((group) => container.appendChild(buildDateGroup(group)));
+  const visible = matches.slice(0, state.visibleCount);
+  groupEventsByDate(visible).forEach((group) => container.appendChild(buildDateGroup(group)));
+
+  updateListFooter(matches.length, visible.length);
+}
+
+function updateListFooter(totalCount, visibleCount) {
+  document.getElementById("list-count").textContent =
+    totalCount === 0 ? "No matches" : `Showing ${visibleCount} of ${totalCount}`;
+
+  const loadMoreButton = document.getElementById("load-more");
+  loadMoreButton.hidden = visibleCount >= totalCount;
 }
 
 function outcomeBadge(result) {
@@ -138,8 +203,14 @@ function renderMatchHeader(event) {
     )
     .join("");
 
+  const matchStart = event.match_start
+    ? `<div class="match-start">Match start: ${formatDateLabel(event.match_start)} ${new Date(event.match_start).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}</div>`
+    : "";
+
   document.getElementById("match-header").innerHTML = `
     <h1>${event.title}</h1>
+    <div class="match-id">${event.event_ticker}</div>
+    ${matchStart}
     <div class="teams">${teamStats}</div>
   `;
 }
@@ -151,9 +222,39 @@ function midPriceSeries(candles) {
   }));
 }
 
+// Combined volume across all of an event's markets, bucketed by candle time.
+function totalVolumeSeries(candlesByMarket) {
+  const totals = new Map();
+  candlesByMarket.forEach((candles) => {
+    candles.forEach((c) => totals.set(c.t, (totals.get(c.t) || 0) + c.volume));
+  });
+  return [...totals.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([time, value]) => ({ time, value }));
+}
+
+function setupMatchStartLine(chartEl, timeSec) {
+  const lineEl = document.createElement("div");
+  lineEl.className = "match-start-line";
+  chartEl.appendChild(lineEl);
+  state.matchStartLineEl = lineEl;
+
+  const update = () => {
+    const x = state.chart?.timeScale().timeToCoordinate(timeSec);
+    lineEl.style.display = x == null ? "none" : "block";
+    if (x != null) lineEl.style.left = `${x}px`;
+  };
+  state.updateMatchStartLine = update;
+  state.chart.timeScale().subscribeVisibleLogicalRangeChange(update);
+  update();
+}
+
 async function renderChart(event) {
   const chartEl = document.getElementById("chart");
   state.chart?.remove();
+  state.matchStartLineEl?.remove();
+  state.matchStartLineEl = null;
+  state.updateMatchStartLine = null;
   state.chart = LightweightCharts.createChart(chartEl, {
     width: chartEl.clientWidth,
     height: chartEl.clientHeight,
@@ -163,7 +264,7 @@ async function renderChart(event) {
       horzLines: { color: "#262b38" },
     },
     rightPriceScale: {
-      scaleMargins: { top: 0.1, bottom: 0.1 },
+      scaleMargins: { top: 0.1, bottom: 0.3 },
     },
     timeScale: { timeVisible: true, secondsVisible: false },
   });
@@ -171,6 +272,8 @@ async function renderChart(event) {
   const candlesByMarket = await Promise.all(
     event.markets.map((market) => fetchJson(`/api/candles?ticker=${encodeURIComponent(market.ticker)}`))
   );
+
+  const matchStartTs = event.match_start ? Date.parse(event.match_start) / 1000 : null;
 
   event.markets.forEach((market, i) => {
     const series = state.chart.addLineSeries({
@@ -180,6 +283,24 @@ async function renderChart(event) {
     });
     series.setData(midPriceSeries(candlesByMarket[i]));
   });
+
+  const firstMarketCandles = candlesByMarket[0] || [];
+  if (matchStartTs !== null && firstMarketCandles.length > 0) {
+    const closestTs = firstMarketCandles.reduce((closest, c) =>
+      Math.abs(c.t - matchStartTs) < Math.abs(closest - matchStartTs) ? c.t : closest
+    , firstMarketCandles[0].t);
+    setupMatchStartLine(chartEl, closestTs);
+  }
+
+  const volumeSeries = state.chart.addHistogramSeries({
+    color: "#4f8cff",
+    priceFormat: { type: "volume" },
+    priceScaleId: "volume",
+  });
+  state.chart.priceScale("volume").applyOptions({
+    scaleMargins: { top: 0.8, bottom: 0 },
+  });
+  volumeSeries.setData(totalVolumeSeries(candlesByMarket));
 
   state.chart.timeScale().fitContent();
 }
@@ -255,6 +376,7 @@ function setupChartResize() {
   const chartEl = document.getElementById("chart");
   new ResizeObserver(() => {
     state.chart?.resize(chartEl.clientWidth, chartEl.clientHeight);
+    state.updateMatchStartLine?.();
   }).observe(chartEl);
 }
 
@@ -280,12 +402,29 @@ function setupKeyboardNav() {
   });
 }
 
+function setupDateFilter() {
+  document.getElementById("date-from").addEventListener("change", () => renderMarketList());
+  document.getElementById("date-to").addEventListener("change", () => renderMarketList());
+  document.querySelectorAll(".date-presets button").forEach((button) => {
+    button.addEventListener("click", () => applyDatePreset(button.dataset.preset));
+  });
+}
+
+function setupLoadMore() {
+  document.getElementById("load-more").addEventListener("click", () => {
+    state.visibleCount += MARKETS_PAGE_SIZE;
+    renderMarketList({ resetPaging: false });
+  });
+}
+
 async function init() {
   state.events = await fetchJson("/api/events");
   state.maxVolume = Math.max(0, ...state.events.map((event) => event.volume));
   renderMarketList();
-  document.getElementById("search").addEventListener("input", renderMarketList);
-  document.getElementById("min-volume").addEventListener("input", renderMarketList);
+  document.getElementById("search").addEventListener("input", () => renderMarketList());
+  document.getElementById("min-volume").addEventListener("input", () => renderMarketList());
+  setupDateFilter();
+  setupLoadMore();
   setupKeyboardNav();
   restoreSidebarState();
   setupSidebarToggle();
