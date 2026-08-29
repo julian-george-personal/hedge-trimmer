@@ -7,6 +7,7 @@ from autotrader.storage.config import TradingConfig
 from autotrader.trading.loop import POLL_INTERVAL_SECONDS
 
 MAX_DECISION_ROWS_DISPLAYED = 200
+MAX_TRADE_ROWS_DISPLAYED = 200
 
 _PAGE = """<!doctype html>
 <html lang="en">
@@ -68,13 +69,17 @@ _PAGE = """<!doctype html>
   .badge.passed {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
   .badge.filtered {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
   .badge.already_positioned {{ background: rgba(79, 140, 255, 0.15); color: var(--accent); }}
+  .badge.buy {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
+  .badge.sell-profit {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
+  .badge.sell-loss {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
+  .badge.sell {{ background: rgba(79, 140, 255, 0.15); color: var(--accent); }}
   .reason {{ color: var(--text-dim); }}
-  details.decision-log {{ margin-top: 2rem; }}
-  details.decision-log summary {{ cursor: pointer; font-weight: 600; font-size: 15px; padding: 0.5rem 0; list-style: none; }}
-  details.decision-log summary::-webkit-details-marker {{ display: none; }}
-  details.decision-log summary::before {{ content: "\\25b8"; display: inline-block; margin-right: 0.4rem; color: var(--text-dim); transition: transform 0.15s ease; }}
-  details.decision-log[open] summary::before {{ transform: rotate(90deg); }}
-  details.decision-log summary .count {{ color: var(--text-dim); font-weight: 400; }}
+  details.log-section {{ margin-top: 2rem; }}
+  details.log-section summary {{ cursor: pointer; font-weight: 600; font-size: 15px; padding: 0.5rem 0; list-style: none; }}
+  details.log-section summary::-webkit-details-marker {{ display: none; }}
+  details.log-section summary::before {{ content: "\\25b8"; display: inline-block; margin-right: 0.4rem; color: var(--text-dim); transition: transform 0.15s ease; }}
+  details.log-section[open] summary::before {{ transform: rotate(90deg); }}
+  details.log-section summary .count {{ color: var(--text-dim); font-weight: 400; }}
 </style>
 </head>
 <body>
@@ -168,7 +173,17 @@ _PAGE = """<!doctype html>
   {position_rows}
 </table>
 
-<details class="decision-log">
+<details class="log-section">
+  <summary>Trading log <span class="count">({trade_count} fills)</span></summary>
+  <p class="hint">Every buy and sell the trader has placed (or would have, in dry run), most recent first.</p>
+  {trade_truncated_note}
+  <table>
+    <tr><th>Time</th><th>Action</th><th>Match</th><th>Ticker</th><th>Contracts</th><th>Price</th><th>Detail</th><th>Mode</th></tr>
+    {trade_rows}
+  </table>
+</details>
+
+<details class="log-section">
   <summary>Decision log <span class="count">({decision_count} evaluated)</span></summary>
   <p class="hint">Every match the trader has evaluated once it entered the lead-time window &mdash; i.e. the point it
   actually decided whether to bet &mdash; with the filter outcome and, if skipped, why. Persisted every tick, so this
@@ -265,6 +280,69 @@ def _decision_row(item: dict) -> str:
     )
 
 
+_TRADE_ROW = (
+    "<tr><td>{time}</td>"
+    "<td><span class=\"badge {badge_class}\">{action_label}</span></td>"
+    "<td>{team_name}<br><span class=\"reason\">{event_ticker}</span></td>"
+    "<td>{ticker}</td><td>{contracts}</td><td>${price:.2f}</td>"
+    "<td class=\"reason\">{detail}</td><td>{mode}</td></tr>"
+)
+
+_SELL_BADGE_CLASSES = {"take_profit": "sell-profit", "stop_loss": "sell-loss"}
+
+
+def _position_trade_events(position: dict) -> list[dict]:
+    event_ticker = position["PK"].removeprefix("POSITION#")
+    mode = "dry-run" if position.get("dry_run", True) else "live"
+    events = [
+        {
+            "time": position.get("entry_time", ""),
+            "badge_class": "buy",
+            "action_label": "Buy",
+            "team_name": position.get("team_name", ""),
+            "event_ticker": event_ticker,
+            "ticker": position.get("ticker", ""),
+            "contracts": position.get("contracts", ""),
+            "price": _as_float(position.get("entry_price_dollars")) or 0.0,
+            "detail": f"order {html.escape(str(position['order_id']))}" if position.get("order_id") else "-",
+            "mode": mode,
+        }
+    ]
+    if position.get("status") == "closed":
+        reason = html.escape(position.get("exit_reason") or "-")
+        order_id = html.escape(str(position["exit_order_id"])) if position.get("exit_order_id") else None
+        events.append(
+            {
+                "time": position.get("exit_time", ""),
+                "badge_class": _SELL_BADGE_CLASSES.get(position.get("exit_reason"), "sell"),
+                "action_label": "Sell",
+                "team_name": position.get("team_name", ""),
+                "event_ticker": event_ticker,
+                "ticker": position.get("ticker", ""),
+                "contracts": position.get("contracts", ""),
+                "price": _as_float(position.get("exit_price_dollars")) or 0.0,
+                "detail": f"{reason} &middot; order {order_id}" if order_id else reason,
+                "mode": mode,
+            }
+        )
+    return events
+
+
+def _trade_row(event: dict) -> str:
+    return _TRADE_ROW.format(
+        time=html.escape(_to_second_precision(event["time"])),
+        badge_class=event["badge_class"],
+        action_label=event["action_label"],
+        team_name=html.escape(event["team_name"]),
+        event_ticker=html.escape(event["event_ticker"]),
+        ticker=html.escape(event["ticker"]),
+        contracts=event["contracts"],
+        price=event["price"],
+        detail=event["detail"],
+        mode=event["mode"],
+    )
+
+
 def _relative_time_ago(iso_timestamp: str, now: datetime) -> str:
     seconds = (now - datetime.fromisoformat(iso_timestamp)).total_seconds()
     if seconds < 60:
@@ -302,6 +380,17 @@ def render_dashboard(
         if len(sorted_scans) > MAX_DECISION_ROWS_DISPLAYED
         else ""
     )
+    trade_events = sorted(
+        (event for position in positions for event in _position_trade_events(position)),
+        key=lambda e: e["time"],
+        reverse=True,
+    )
+    shown_trades = trade_events[:MAX_TRADE_ROWS_DISPLAYED]
+    trade_truncated_note = (
+        f'<p class="hint">Showing the {MAX_TRADE_ROWS_DISPLAYED} most recent of {len(trade_events)} fills.</p>'
+        if len(trade_events) > MAX_TRADE_ROWS_DISPLAYED
+        else ""
+    )
     return _PAGE.format(
         saved_banner=(
             '<div class="banner saved">&#10003; Filters applied. The running loop will use these values on its '
@@ -333,6 +422,9 @@ def render_dashboard(
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
         position_rows="".join(_position_row(p) for p in sorted_positions) or "<tr><td colspan=8>none yet</td></tr>",
+        trade_count=len(trade_events),
+        trade_truncated_note=trade_truncated_note,
+        trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",
         decision_count=len(sorted_scans),
         decision_truncated_note=decision_truncated_note,
         decision_rows="".join(_decision_row(r) for r in shown_scans) or "<tr><td colspan=4>no decisions recorded yet</td></tr>",
