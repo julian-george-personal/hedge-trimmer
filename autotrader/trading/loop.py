@@ -1,18 +1,26 @@
 import logging
 import time
+from collections import Counter
+from datetime import datetime, timezone
 
 from autotrader.clients.kalshi import KalshiClient
 from autotrader.clients.pandascore import PandaScoreClient
-from autotrader.storage.config import load_config
+from autotrader.storage.config import TradingConfig, load_config
 from autotrader.storage.state import Store
-from autotrader.trading.discovery import discover_candidates
 from autotrader.trading.execution import enter_position
-from autotrader.trading.filters import evaluate_candidate
+from autotrader.trading.market_scan import MarketScanResult, scan_markets
 from autotrader.trading.monitor import check_open_positions
 
 logger = logging.getLogger("autotrader.loop")
 
 POLL_INTERVAL_SECONDS = 30
+
+# The only statuses that represent the trader actually reaching a betting
+# decision for a match (i.e. it's entered the lead-time window). "no_match"
+# and "outside_window" just mean "not yet time to decide" — recording those
+# every tick for as long as a market's been open would flood the history
+# with the same non-decision for hours before it ever becomes relevant.
+_DECISION_STATUSES = {"passed", "filtered", "already_positioned"}
 
 
 class Runner:
@@ -22,20 +30,26 @@ class Runner:
         self.store = store
         self.series_ticker = series_ticker
 
-    def _try_enter_new_positions(self, config) -> None:
-        candidates = discover_candidates(self.kalshi_client, self.pandascore_client, self.series_ticker, config.lead_time_minutes)
-        logger.info("discovered %d candidate match(es) within the lead-time window", len(candidates))
-        for candidate in candidates:
-            event_ticker = candidate["event_ticker"]
-            if self.store.get_position(event_ticker) is not None:
-                continue  # already acted on this match
+    def _record_decisions(self, results: list[MarketScanResult], scanned_at: str) -> list[MarketScanResult]:
+        decisions = [r for r in results if r.status in _DECISION_STATUSES]
+        for result in decisions:
+            self.store.put_market_scan(result.event_ticker, scanned_at, result.to_item(scanned_at))
+        return decisions
 
-            result = evaluate_candidate(self.kalshi_client, candidate, config)
-            if not result.passes:
-                logger.info("skip %s: %s", event_ticker, result.reason)
-                continue
+    def _scan_and_act(self, config: TradingConfig) -> None:
+        scanned_at = datetime.now(timezone.utc).isoformat()
+        results = scan_markets(self.kalshi_client, self.pandascore_client, self.store, self.series_ticker, config)
+        decisions = self._record_decisions(results, scanned_at)
+        logger.info(
+            "scanned %d open market(s), %d at decision point: %s",
+            len(results), len(decisions), dict(Counter(r.status for r in decisions)),
+        )
 
-            enter_position(self.kalshi_client, self.store, event_ticker, result, config)
+        if not config.enabled:
+            return
+        for result in decisions:
+            if result.status == "passed":
+                enter_position(self.kalshi_client, self.store, result.event_ticker, result.to_filter_result(), config)
 
     def tick(self) -> None:
         config = load_config(self.store)
@@ -45,11 +59,10 @@ class Runner:
             config.enabled, config.armed, config.side, len(open_positions),
         )
 
-        if config.enabled:
-            try:
-                self._try_enter_new_positions(config)
-            except Exception:
-                logger.exception("error while looking for new matches to enter")
+        try:
+            self._scan_and_act(config)
+        except Exception:
+            logger.exception("error while scanning for new matches to enter")
 
         try:
             check_open_positions(self.kalshi_client, self.store, config)

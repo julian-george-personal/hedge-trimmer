@@ -50,9 +50,15 @@ def evaluate_candidate(kalshi_client: KalshiClient, candidate: dict, config: Tra
     volume = sum(m.get("volume") or 0 for m in markets)
 
     if not (config.pre_match_volume_min <= volume <= config.pre_match_volume_max):
-        return FilterResult(passes=False, reason=f"volume {volume} outside configured range")
+        return FilterResult(
+            passes=False,
+            reason=f"volume {volume:.0f} outside configured range [{config.pre_match_volume_min:.0f}, {config.pre_match_volume_max:.0f}]",
+        )
     if not (config.win_prob_min <= win_prob_percent <= config.win_prob_max):
-        return FilterResult(passes=False, reason=f"win prob {win_prob_percent:.1f}% outside configured range")
+        return FilterResult(
+            passes=False,
+            reason=f"win prob {win_prob_percent:.1f}% outside configured range [{config.win_prob_min:.1f}%, {config.win_prob_max:.1f}%]",
+        )
 
     side_market = candidate["markets"][side_index]
     return FilterResult(

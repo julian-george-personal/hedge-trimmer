@@ -1,36 +1,60 @@
 import html
+from datetime import datetime, timezone
 
 from autotrader.storage.config import TradingConfig
+from autotrader.trading.loop import POLL_INTERVAL_SECONDS
 
 _PAGE = """<!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Autotrader</title>
+<title>autotrader</title>
 <style>
-  body {{ font-family: -apple-system, sans-serif; background: #0f1115; color: #e6e6e6; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }}
+  :root {{
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262b38;
+    --text: #e6e9f0;
+    --text-dim: #8b93a7;
+    --accent: #4f8cff;
+    --yes: #3fbf7f;
+    --no: #e0555a;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; background: var(--bg); color: var(--text); max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }}
   h1, h2 {{ font-weight: 600; }}
-  .status {{ padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }}
-  .status.running {{ background: #14351f; }}
-  .status.stopped {{ background: #35291d; }}
-  .status.armed {{ color: #ff8080; font-weight: 600; }}
-  .status.dry {{ color: #9fd39f; }}
+  h1 {{ font-size: 18px; }}
+  h2 {{ font-size: 15px; margin-top: 2rem; }}
+  a {{ color: var(--accent); text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  .nav {{ margin-bottom: 1.5rem; padding-bottom: 12px; border-bottom: 1px solid var(--border); }}
+  .status {{ background: var(--panel); border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }}
+  .status.armed {{ color: var(--no); font-weight: 600; }}
+  .status.dry {{ color: var(--yes); font-weight: 600; }}
+  .banner.saved {{ padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; background: rgba(63, 191, 127, 0.12); border: 1px solid var(--yes); color: var(--yes); }}
+  .save-meta {{ margin-top: 0.6rem; font-size: 12px; color: var(--text-dim); }}
   form.controls {{ display: inline; }}
-  button {{ background: #2a2f3a; color: #e6e6e6; border: 1px solid #444; border-radius: 6px; padding: 0.4rem 0.9rem; margin-right: 0.5rem; cursor: pointer; }}
-  button.danger {{ background: #4a1f1f; }}
+  button {{ font: inherit; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.9rem; margin-right: 0.5rem; cursor: pointer; }}
+  button:hover {{ border-color: var(--accent); }}
+  button.danger {{ background: rgba(224, 85, 90, 0.12); border-color: var(--no); color: var(--no); }}
   table {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; }}
-  th, td {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #2a2f3a; font-size: 0.9rem; }}
-  label {{ display: block; margin-top: 0.6rem; font-size: 0.85rem; color: #aaa; }}
-  input, select {{ width: 100%; box-sizing: border-box; background: #1a1d24; color: #e6e6e6; border: 1px solid #444; border-radius: 6px; padding: 0.4rem; }}
+  th, td {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 13px; }}
+  th {{ color: var(--text-dim); font-weight: 500; }}
+  label {{ display: block; margin-top: 0.6rem; font-size: 12px; color: var(--text-dim); }}
+  input, select {{ font: inherit; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem; }}
+  input:focus, select:focus {{ outline: none; border-color: var(--accent); }}
   .row {{ display: flex; gap: 1rem; }}
   .row > div {{ flex: 1; }}
   .save {{ margin-top: 1rem; }}
 </style>
 </head>
 <body>
-<h1>Autotrader</h1>
+<h1>autotrader</h1>
+<div class="nav"><a href="/debug">Decision log &rarr;</a></div>
 
-<div class="status {running_class}">
+{saved_banner}
+
+<div class="status">
   <strong>{running_label}</strong> &middot; <span class="status {armed_class}">{armed_label}</span>
   <form class="controls" method="post" action="/control">
     <input type="hidden" name="action" value="{toggle_run_action}">
@@ -98,7 +122,8 @@ _PAGE = """<!doctype html>
       <input type="number" step="1" name="lead_time_minutes" value="{lead_time_minutes}">
     </div>
   </div>
-  <div class="save"><button type="submit">Save filters</button></div>
+  <div class="save"><button type="submit">Apply filters</button></div>
+  <div class="save-meta">{last_saved_text}</div>
 </form>
 
 <h2>Positions</h2>
@@ -131,9 +156,39 @@ def _position_row(position: dict) -> str:
     )
 
 
-def render_dashboard(config: TradingConfig, positions: list[dict]) -> str:
+def _relative_time_ago(iso_timestamp: str, now: datetime) -> str:
+    seconds = (now - datetime.fromisoformat(iso_timestamp)).total_seconds()
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _last_applied_text(config: TradingConfig) -> str:
+    if not config.filters_updated_at:
+        return "Not applied yet &mdash; showing defaults."
+    ago = _relative_time_ago(config.filters_updated_at, datetime.now(timezone.utc))
+    scope = (
+        "New-entry filters are active now since the trader is Running."
+        if config.enabled
+        else "New-entry filters won't be used until you click Start; stop-loss/take-profit still apply to any open position."
+    )
+    return f"Filters last applied {ago}. {scope}"
+
+
+def render_dashboard(config: TradingConfig, positions: list[dict], saved: bool = False) -> str:
     sorted_positions = sorted(positions, key=lambda p: p.get("entry_time", ""), reverse=True)
     return _PAGE.format(
+        saved_banner=(
+            '<div class="banner saved">&#10003; Filters applied. The running loop will use these values on its '
+            f"next tick (within {POLL_INTERVAL_SECONDS}s).</div>"
+            if saved
+            else ""
+        ),
+        last_saved_text=_last_applied_text(config),
         running_class="running" if config.enabled else "stopped",
         running_label="Running" if config.enabled else "Stopped",
         armed_class="armed" if config.armed else "dry",

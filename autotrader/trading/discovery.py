@@ -15,7 +15,7 @@ def normalize_team_name(name: str) -> str:
     return _NORMALIZE_RE.sub("", name.lower())
 
 
-def _parse_iso(ts: str) -> datetime:
+def parse_iso(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
@@ -41,11 +41,11 @@ def _pandascore_team_pair(match: dict) -> frozenset[str] | None:
 
 def find_begin_at(event: dict, pandascore_matches: list[dict]) -> str | None:
     target_pair = _team_pair(event)
-    close_time = _parse_iso(event["close_time"])
+    close_time = parse_iso(event["close_time"])
     candidates = [m for m in pandascore_matches if _pandascore_team_pair(m) == target_pair]
     if not candidates:
         return None
-    closest = min(candidates, key=lambda m: abs(_parse_iso(m["begin_at"]) - close_time))
+    closest = min(candidates, key=lambda m: abs(parse_iso(m["begin_at"]) - close_time))
     return closest["begin_at"]
 
 
@@ -53,7 +53,7 @@ def is_within_entry_window(begin_at: str, now: datetime, lead_time_minutes: floa
     """True once `now` has entered the lead-time window before the match's
     scheduled start, i.e. it's time to evaluate/enter — but not so far past
     start that entering would be pointless."""
-    seconds_until_start = (_parse_iso(begin_at) - now).total_seconds()
+    seconds_until_start = (parse_iso(begin_at) - now).total_seconds()
     return 0 <= seconds_until_start <= lead_time_minutes * 60
 
 

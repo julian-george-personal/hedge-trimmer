@@ -7,6 +7,10 @@ def _position_key(event_ticker: str) -> dict:
     return {"PK": f"POSITION#{event_ticker}", "SK": "POSITION"}
 
 
+def _scan_key(event_ticker: str, scanned_at: str) -> dict:
+    return {"PK": f"SCAN#{event_ticker}", "SK": scanned_at}
+
+
 class Store:
     def __init__(self, table_name: str, region_name: str = "us-east-1"):
         # Unlike Lambda, App Runner containers don't get AWS_REGION injected
@@ -29,13 +33,22 @@ class Store:
         self.table.put_item(Item={**_position_key(event_ticker), **position})
 
     def list_positions(self) -> list[dict]:
+        return [item for item in self._scan_table() if item["PK"].startswith("POSITION#")]
+
+    def list_open_positions(self) -> list[dict]:
+        return [position for position in self.list_positions() if position.get("status") == "open"]
+
+    def put_market_scan(self, event_ticker: str, scanned_at: str, item: dict) -> None:
+        self.table.put_item(Item={**_scan_key(event_ticker, scanned_at), **item})
+
+    def list_market_scans(self) -> list[dict]:
+        return [item for item in self._scan_table() if item["PK"].startswith("SCAN#")]
+
+    def _scan_table(self) -> list[dict]:
         items = []
         response = self.table.scan()
         items.extend(response.get("Items", []))
         while "LastEvaluatedKey" in response:
             response = self.table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
             items.extend(response.get("Items", []))
-        return [item for item in items if item["PK"].startswith("POSITION#")]
-
-    def list_open_positions(self) -> list[dict]:
-        return [position for position in self.list_positions() if position.get("status") == "open"]
+        return items

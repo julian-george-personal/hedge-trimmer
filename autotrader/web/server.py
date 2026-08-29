@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -7,6 +8,7 @@ from autotrader.storage.config import load_config, save_config
 from autotrader.storage.state import Store
 from autotrader.web.auth import is_authorized
 from autotrader.web.dashboard import render_dashboard
+from autotrader.web.debug_view import render_debug_view
 
 logger = logging.getLogger("autotrader.web")
 
@@ -68,7 +70,10 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
             if not self._require_auth():
                 return
             if parsed.path == "/":
-                self._send_html(200, render_dashboard(load_config(store), store.list_positions()))
+                saved = "saved" in parse_qs(parsed.query)
+                self._send_html(200, render_dashboard(load_config(store), store.list_positions(), saved=saved))
+            elif parsed.path == "/debug":
+                self._send_html(200, render_debug_view(store.list_market_scans()))
             elif parsed.path == "/api/positions":
                 self._send_json(200, store.list_positions())
             else:
@@ -91,8 +96,11 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
             if parsed.path == "/config":
                 current = load_config(store)
                 updates = _config_updates_from_fields(current, fields)
+                updates["filters_updated_at"] = datetime.now(timezone.utc).isoformat()
                 save_config(store, current.with_updates(**updates))
                 logger.info("config updated: %s", updates)
+                self._redirect("/?saved=1")
+                return
             elif parsed.path == "/control":
                 action = fields.get("action", "")
                 updates = _CONTROL_ACTIONS.get(action)
@@ -101,12 +109,13 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
                     logger.info("control action %r applied: %s", action, updates)
                 else:
                     logger.warning("ignored unknown control action %r", action)
+                self._redirect("/")
             else:
                 self.send_error(404)
-                return
 
+        def _redirect(self, location: str) -> None:
             self.send_response(303)
-            self.send_header("Location", "/")
+            self.send_header("Location", location)
             self.send_header("Content-Length", "0")
             self.end_headers()
 

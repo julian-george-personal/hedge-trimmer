@@ -16,6 +16,7 @@ DEFAULTS = {
     "order_style": "limit",
     "enabled": False,
     "armed": False,
+    "filters_updated_at": None,
 }
 
 
@@ -33,6 +34,7 @@ class TradingConfig:
     order_style: str
     enabled: bool
     armed: bool
+    filters_updated_at: str | None
 
     @classmethod
     def defaults(cls) -> "TradingConfig":
@@ -54,6 +56,7 @@ class TradingConfig:
             order_style=merged["order_style"],
             enabled=bool(merged["enabled"]),
             armed=bool(merged["armed"]),
+            filters_updated_at=merged["filters_updated_at"],
         )
 
     def to_item(self) -> dict:
