@@ -30,9 +30,19 @@ _PAGE = """<!doctype html>
   h2 {{ font-size: 15px; margin-top: 2rem; }}
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  .status {{ background: var(--panel); border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }}
-  .status.armed {{ color: var(--no); font-weight: 600; }}
-  .status.dry {{ color: var(--yes); font-weight: 600; }}
+  .status {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; background: var(--panel); border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }}
+  .status.running {{ border-color: var(--yes); background: rgba(63, 191, 127, 0.08); }}
+  .status.stopped {{ border-color: var(--no); background: rgba(224, 85, 90, 0.08); }}
+  .status-left, .status-right {{ display: flex; align-items: center; gap: 0.6rem; }}
+  .mode-label.armed {{ color: var(--no); font-weight: 600; }}
+  .mode-label.dry {{ color: var(--yes); font-weight: 600; }}
+  .switch {{ position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }}
+  .switch input {{ opacity: 0; width: 0; height: 0; }}
+  .switch .slider {{ position: absolute; inset: 0; cursor: pointer; background-color: var(--yes); transition: background-color 0.15s ease; border-radius: 999px; }}
+  .switch .slider::before {{ content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: #fff; transition: transform 0.15s ease; border-radius: 50%; }}
+  .switch input:checked + .slider {{ background-color: var(--no); }}
+  .switch input:checked + .slider::before {{ transform: translateX(18px); }}
+  .switch input:focus-visible + .slider {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
   .banner.saved {{ padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; background: rgba(63, 191, 127, 0.12); border: 1px solid var(--yes); color: var(--yes); }}
   .save-meta {{ margin-top: 0.6rem; font-size: 12px; color: var(--text-dim); }}
   form.controls {{ display: inline; }}
@@ -67,16 +77,24 @@ _PAGE = """<!doctype html>
 
 {saved_banner}
 
-<div class="status">
-  <strong>{running_label}</strong> &middot; <span class="status {armed_class}">{armed_label}</span>
-  <form class="controls" method="post" action="/control">
-    <input type="hidden" name="action" value="{toggle_run_action}">
-    <button type="submit">{toggle_run_label}</button>
-  </form>
-  <form class="controls" method="post" action="/control" {armed_confirm}>
-    <input type="hidden" name="action" value="{toggle_armed_action}">
-    <button type="submit" class="{armed_button_class}">{toggle_armed_label}</button>
-  </form>
+<div class="status {running_class}">
+  <div class="status-left">
+    <strong>{running_label}</strong>
+    <form class="controls" method="post" action="/control">
+      <input type="hidden" name="action" value="{toggle_run_action}">
+      <button type="submit">{toggle_run_label}</button>
+    </form>
+  </div>
+  <div class="status-right">
+    <span class="mode-label {armed_class}">{armed_label}</span>
+    <form class="controls" method="post" action="/control" id="armed-form">
+      <input type="hidden" name="action" id="armed-action-input" value="{toggle_armed_action}">
+      <label class="switch" title="Toggle live vs dummy betting">
+        <input type="checkbox" id="armed-toggle" {armed_checked} onchange="autotraderOnArmedToggle(this)">
+        <span class="slider"></span>
+      </label>
+    </form>
+  </div>
 </div>
 
 <h2>Filters</h2>
@@ -157,6 +175,17 @@ _PAGE = """<!doctype html>
   </table>
 </details>
 
+<script>
+function autotraderOnArmedToggle(checkbox) {{
+  if (checkbox.checked && !confirm('Arm live trading? This will place real orders with real money.')) {{
+    checkbox.checked = false;
+    return;
+  }}
+  document.getElementById('armed-action-input').value = checkbox.checked ? 'arm' : 'disarm';
+  document.getElementById('armed-form').submit();
+}}
+</script>
+
 </body>
 </html>
 """
@@ -207,11 +236,18 @@ def _decision_passed_detail(item: dict) -> str:
     )
 
 
+def _to_second_precision(iso_timestamp: str) -> str:
+    try:
+        return datetime.fromisoformat(iso_timestamp).isoformat(timespec="seconds")
+    except ValueError:
+        return iso_timestamp
+
+
 def _decision_row(item: dict) -> str:
     status = item.get("status", "")
     detail = _decision_passed_detail(item) if status == "passed" else html.escape(item.get("reason") or "")
     return _DECISION_ROW.format(
-        scanned_at=html.escape(item.get("scanned_at", "")),
+        scanned_at=html.escape(_to_second_precision(item.get("scanned_at", ""))),
         teams=html.escape(" vs ".join(item.get("team_names", []))),
         event_ticker=html.escape(item.get("event_ticker", "")),
         status=status,
@@ -233,7 +269,7 @@ def _relative_time_ago(iso_timestamp: str, now: datetime) -> str:
 
 def _last_applied_text(config: TradingConfig) -> str:
     if not config.filters_updated_at:
-        return "Not applied yet &mdash; showing defaults."
+        return ""
     ago = _relative_time_ago(config.filters_updated_at, datetime.now(timezone.utc))
     scope = (
         "New-entry filters are active now since the trader is Running."
@@ -272,9 +308,7 @@ def render_dashboard(
         toggle_run_action="stop" if config.enabled else "start",
         toggle_run_label="Stop" if config.enabled else "Start",
         toggle_armed_action="disarm" if config.armed else "arm",
-        toggle_armed_label="Disarm" if config.armed else "Arm (place real orders)",
-        armed_button_class="" if config.armed else "danger",
-        armed_confirm="" if config.armed else 'onsubmit="return confirm(\'Arm live trading? This will place real orders with real money.\');"',
+        armed_checked="checked" if config.armed else "",
         underdog_selected="selected" if config.side == "underdog" else "",
         overdog_selected="selected" if config.side == "overdog" else "",
         limit_selected="selected" if config.order_style == "limit" else "",
