@@ -25,7 +25,6 @@ def _require_env() -> dict[str, str]:
         sys.exit(f"autotrader: missing required environment variables: {', '.join(missing)}")
     return env
 
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     env = _require_env()
