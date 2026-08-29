@@ -24,6 +24,7 @@ class Runner:
 
     def _try_enter_new_positions(self, config) -> None:
         candidates = discover_candidates(self.kalshi_client, self.pandascore_client, self.series_ticker, config.lead_time_minutes)
+        logger.info("discovered %d candidate match(es) within the lead-time window", len(candidates))
         for candidate in candidates:
             event_ticker = candidate["event_ticker"]
             if self.store.get_position(event_ticker) is not None:
@@ -38,6 +39,11 @@ class Runner:
 
     def tick(self) -> None:
         config = load_config(self.store)
+        open_positions = self.store.list_open_positions()
+        logger.info(
+            "tick: enabled=%s armed=%s side=%s open_positions=%d",
+            config.enabled, config.armed, config.side, len(open_positions),
+        )
 
         if config.enabled:
             try:
@@ -53,5 +59,12 @@ class Runner:
     def run(self) -> None:
         logger.info("autotrader loop starting, polling every %ds", POLL_INTERVAL_SECONDS)
         while True:
-            self.tick()
+            try:
+                self.tick()
+            except Exception:
+                # A failure loading config (e.g. DynamoDB unreachable) would
+                # otherwise be uncaught and silently kill this background
+                # thread forever, while the web server keeps reporting
+                # healthy — better to log and keep retrying every tick.
+                logger.exception("unhandled error in autotrader loop tick")
             time.sleep(POLL_INTERVAL_SECONDS)

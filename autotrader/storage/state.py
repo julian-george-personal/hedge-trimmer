@@ -8,8 +8,12 @@ def _position_key(event_ticker: str) -> dict:
 
 
 class Store:
-    def __init__(self, table_name: str):
-        self.table = boto3.resource("dynamodb").Table(table_name)
+    def __init__(self, table_name: str, region_name: str = "us-east-1"):
+        # Unlike Lambda, App Runner containers don't get AWS_REGION injected
+        # automatically — boto3 raises NoRegionError without an explicit
+        # region_name (confirmed by running the built image locally with no
+        # region configured).
+        self.table = boto3.resource("dynamodb", region_name=region_name).Table(table_name)
 
     def get_config(self) -> dict | None:
         item = self.table.get_item(Key=CONFIG_KEY).get("Item")

@@ -54,6 +54,13 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
             return False
 
         def do_GET(self) -> None:
+            try:
+                self._do_GET()
+            except Exception:
+                logger.exception("unhandled error handling GET %s", self.path)
+                self.send_error(500)
+
+        def _do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/health":
                 self._send_json(200, {"status": "ok"})
@@ -68,6 +75,13 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
                 self.send_error(404)
 
         def do_POST(self) -> None:
+            try:
+                self._do_POST()
+            except Exception:
+                logger.exception("unhandled error handling POST %s", self.path)
+                self.send_error(500)
+
+        def _do_POST(self) -> None:
             if not self._require_auth():
                 return
             parsed = urlparse(self.path)
@@ -76,11 +90,17 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
 
             if parsed.path == "/config":
                 current = load_config(store)
-                save_config(store, current.with_updates(**_config_updates_from_fields(current, fields)))
+                updates = _config_updates_from_fields(current, fields)
+                save_config(store, current.with_updates(**updates))
+                logger.info("config updated: %s", updates)
             elif parsed.path == "/control":
-                updates = _CONTROL_ACTIONS.get(fields.get("action", ""))
+                action = fields.get("action", "")
+                updates = _CONTROL_ACTIONS.get(action)
                 if updates:
                     save_config(store, load_config(store).with_updates(**updates))
+                    logger.info("control action %r applied: %s", action, updates)
+                else:
+                    logger.warning("ignored unknown control action %r", action)
             else:
                 self.send_error(404)
                 return
@@ -107,7 +127,10 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
             self.wfile.write(body)
 
         def log_message(self, format: str, *args) -> None:
-            pass
+            # Route the standard per-request access log through our own
+            # logger (-> CloudWatch) instead of BaseHTTPRequestHandler's
+            # default of writing straight to stderr with no timestamp/level.
+            logger.info("%s - %s", self.address_string(), format % args)
 
     return Handler
 

@@ -1,4 +1,5 @@
 import base64
+import logging
 import time
 import uuid
 
@@ -6,9 +7,23 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+logger = logging.getLogger("autotrader.clients.kalshi")
+
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 API_PREFIX = "/trade-api/v2"
 REQUEST_TIMEOUT_SECONDS = 30
+
+
+def _raise_for_status_with_body(resp: requests.Response) -> None:
+    """requests.HTTPError's default message omits the response body, which
+    is where Kalshi puts the actual rejection reason (bad field name,
+    insufficient balance, market closed, etc) — critical for diagnosing
+    order-placement failures, especially since this order schema hasn't
+    been verified field-for-field against live docs yet."""
+    if resp.ok:
+        return
+    logger.error("Kalshi API error %s %s -> %s: %s", resp.request.method, resp.request.url, resp.status_code, resp.text)
+    resp.raise_for_status()
 
 # The exact create-order field names below (ticker/client_order_id/side/
 # action/count/type/yes_price/no_price) match Kalshi's documented v2 shape
@@ -46,19 +61,20 @@ class KalshiClient:
     def get(self, path: str, params: dict | None = None) -> dict:
         headers = self._auth_headers("GET", API_PREFIX + path)
         resp = self.session.get(self.base_url + path, headers=headers, params=params, timeout=REQUEST_TIMEOUT_SECONDS)
-        resp.raise_for_status()
+        _raise_for_status_with_body(resp)
         return resp.json()
 
     def post(self, path: str, body: dict) -> dict:
+        logger.info("POST %s: %s", path, body)
         headers = self._auth_headers("POST", API_PREFIX + path)
         resp = self.session.post(self.base_url + path, headers=headers, json=body, timeout=REQUEST_TIMEOUT_SECONDS)
-        resp.raise_for_status()
+        _raise_for_status_with_body(resp)
         return resp.json()
 
     def delete(self, path: str) -> dict:
         headers = self._auth_headers("DELETE", API_PREFIX + path)
         resp = self.session.delete(self.base_url + path, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-        resp.raise_for_status()
+        _raise_for_status_with_body(resp)
         return resp.json() if resp.content else {}
 
     def open_markets(self, series_ticker: str) -> list[dict]:

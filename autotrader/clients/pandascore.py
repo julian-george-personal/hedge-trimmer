@@ -1,6 +1,9 @@
+import logging
 from datetime import datetime
 
 import requests
+
+logger = logging.getLogger("autotrader.clients.pandascore")
 
 BASE_URL = "https://api.pandascore.co"
 CS2_VIDEOGAME_TITLE = "cs-2"
@@ -21,6 +24,8 @@ class PandaScoreClient:
         resp = self.session.get(
             self.base_url + path, params={**(params or {}), "token": self.token}, timeout=REQUEST_TIMEOUT_SECONDS
         )
+        if not resp.ok:
+            logger.error("PandaScore API error GET %s -> %s: %s", path, resp.status_code, resp.text)
         resp.raise_for_status()
         return resp.json()
 
