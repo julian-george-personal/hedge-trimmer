@@ -1,6 +1,7 @@
 import html
 from datetime import datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from autotrader.storage.config import TradingConfig
 from autotrader.trading.loop import POLL_INTERVAL_SECONDS
@@ -49,6 +50,10 @@ _PAGE = """<!doctype html>
   button {{ font: inherit; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.9rem; margin-right: 0.5rem; cursor: pointer; }}
   button:hover {{ border-color: var(--accent); }}
   button.danger {{ background: rgba(224, 85, 90, 0.12); border-color: var(--no); color: var(--no); }}
+  button.icon-btn {{ padding: 0.4rem 0.6rem; line-height: 0; }}
+  button.icon-btn svg {{ display: block; width: 16px; height: 16px; }}
+  button.icon-btn.stop {{ background: rgba(224, 85, 90, 0.12); border-color: var(--no); color: var(--no); }}
+  button.icon-btn.play {{ background: rgba(63, 191, 127, 0.12); border-color: var(--yes); color: var(--yes); }}
   table {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; }}
   th, td {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 13px; }}
   th {{ color: var(--text-dim); font-weight: 500; }}
@@ -82,7 +87,7 @@ _PAGE = """<!doctype html>
     <strong>{running_label}</strong>
     <form class="controls" method="post" action="/control">
       <input type="hidden" name="action" value="{toggle_run_action}">
-      <button type="submit">{toggle_run_label}</button>
+      <button type="submit" class="icon-btn {toggle_run_class}" title="{toggle_run_label}" aria-label="{toggle_run_label}">{toggle_run_icon}</button>
     </form>
   </div>
   <div class="status-right">
@@ -195,6 +200,9 @@ _ROW = (
     "<td>${entry:.2f}</td><td>{exit}</td><td>{reason}</td><td>{mode}</td></tr>"
 )
 
+_STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>'
+_PLAY_ICON = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5v11l9-5.5-9-5.5z"/></svg>'
+
 _DECISION_STATUS_LABELS = {
     "passed": "Passed",
     "filtered": "Filtered out",
@@ -238,7 +246,8 @@ def _decision_passed_detail(item: dict) -> str:
 
 def _to_second_precision(iso_timestamp: str) -> str:
     try:
-        return datetime.fromisoformat(iso_timestamp).isoformat(timespec="seconds")
+        dt = datetime.fromisoformat(iso_timestamp).astimezone(ZoneInfo("America/New_York"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
     except ValueError:
         return iso_timestamp
 
@@ -307,6 +316,8 @@ def render_dashboard(
         armed_label="ARMED (live orders)" if config.armed else "Dry run (no real orders)",
         toggle_run_action="stop" if config.enabled else "start",
         toggle_run_label="Stop" if config.enabled else "Start",
+        toggle_run_class="stop" if config.enabled else "play",
+        toggle_run_icon=_STOP_ICON if config.enabled else _PLAY_ICON,
         toggle_armed_action="disarm" if config.armed else "arm",
         armed_checked="checked" if config.armed else "",
         underdog_selected="selected" if config.side == "underdog" else "",
