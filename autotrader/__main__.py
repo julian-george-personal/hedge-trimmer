@@ -18,7 +18,6 @@ REQUIRED_ENV_VARS = [
     "DYNAMO_TABLE_NAME",
 ]
 
-
 def _require_env() -> dict[str, str]:
     env = {name: os.environ.get(name) for name in REQUIRED_ENV_VARS}
     missing = [name for name, value in env.items() if not value]
