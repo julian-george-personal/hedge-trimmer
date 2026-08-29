@@ -23,7 +23,7 @@ def _entry_limit_price_cents(ask_dollars: float) -> int:
 def _place_entry_order(kalshi_client: KalshiClient, result: FilterResult, contracts: int, order_style: str) -> dict:
     if order_style == "limit":
         market = kalshi_client.get_market(result.side_ticker)
-        price_cents = _entry_limit_price_cents(market["yes_ask"] / 100)
+        price_cents = _entry_limit_price_cents(float(market["yes_ask_dollars"]))
         return kalshi_client.create_order(result.side_ticker, "yes", "buy", contracts, "limit", price_cents)
     return kalshi_client.create_order(result.side_ticker, "yes", "buy", contracts, "market")
 

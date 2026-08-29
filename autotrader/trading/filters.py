@@ -15,16 +15,24 @@ class FilterResult:
     reason: str | None = None
 
 
+def _market_float(market: dict, field: str) -> float | None:
+    """Kalshi's market snapshot reports numeric fields as decimal strings
+    (e.g. "0.5100", "28.00") under `_dollars`/`_fp`-suffixed keys, not the
+    integer-cents fields (`yes_bid`, `yes_ask`, `last_price`, `volume`) an
+    older version of the API used."""
+    value = market.get(field)
+    return float(value) if value is not None else None
+
+
 def quote_price_dollars(market: dict) -> float | None:
     """Current mid price if there's a live two-sided quote, else the last
     traded price as a fallback — same precedence as the backtester's
     ask/bid-aware fields, adapted to a single live snapshot rather than a
     historical candle series."""
-    yes_bid, yes_ask = market.get("yes_bid"), market.get("yes_ask")
+    yes_bid, yes_ask = _market_float(market, "yes_bid_dollars"), _market_float(market, "yes_ask_dollars")
     if yes_bid is not None and yes_ask is not None and (yes_bid > 0 or yes_ask > 0):
-        return ((yes_bid + yes_ask) / 2) / 100
-    last_price = market.get("last_price")
-    return (last_price / 100) if last_price else None
+        return (yes_bid + yes_ask) / 2
+    return _market_float(market, "last_price_dollars") or None
 
 
 def _assign_side(candidate: dict, prices: list[float], side: str) -> int:
@@ -54,7 +62,7 @@ def evaluate_candidate(kalshi_client: KalshiClient, candidate: dict, config: Tra
     side_index = _assign_side(candidate, prices, config.side)
     entry_price = prices[side_index]
     win_prob_percent = entry_price * 100
-    volume = sum(m.get("volume") or 0 for m in markets)
+    volume = sum(_market_float(m, "volume_fp") or 0 for m in markets)
 
     if not (config.pre_match_volume_min <= volume <= config.pre_match_volume_max):
         return FilterResult(

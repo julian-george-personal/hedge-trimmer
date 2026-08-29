@@ -35,7 +35,7 @@ def _exit_reason(entry_price: float, current_price: float, config: TradingConfig
 def _place_exit_order(kalshi_client: KalshiClient, ticker: str, contracts: int, order_style: str) -> dict:
     if order_style == "limit":
         market = kalshi_client.get_market(ticker)
-        price_cents = _exit_limit_price_cents(market["yes_bid"] / 100)
+        price_cents = _exit_limit_price_cents(float(market["yes_bid_dollars"]))
         return kalshi_client.create_order(ticker, "yes", "sell", contracts, "limit", price_cents)
     return kalshi_client.create_order(ticker, "yes", "sell", contracts, "market")
 
