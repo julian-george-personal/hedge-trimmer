@@ -1,14 +1,17 @@
 import html
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from autotrader.storage.config import TradingConfig
 from autotrader.trading.loop import POLL_INTERVAL_SECONDS
+
+MAX_DECISION_ROWS_DISPLAYED = 200
 
 _PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>autotrader</title>
+<title>hedge trimmer - dashboard</title>
 <style>
   :root {{
     --bg: #0f1115;
@@ -27,7 +30,6 @@ _PAGE = """<!doctype html>
   h2 {{ font-size: 15px; margin-top: 2rem; }}
   a {{ color: var(--accent); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  .nav {{ margin-bottom: 1.5rem; padding-bottom: 12px; border-bottom: 1px solid var(--border); }}
   .status {{ background: var(--panel); border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; }}
   .status.armed {{ color: var(--no); font-weight: 600; }}
   .status.dry {{ color: var(--yes); font-weight: 600; }}
@@ -46,11 +48,22 @@ _PAGE = """<!doctype html>
   .row {{ display: flex; gap: 1rem; }}
   .row > div {{ flex: 1; }}
   .save {{ margin-top: 1rem; }}
+  .hint {{ color: var(--text-dim); font-size: 12px; margin-bottom: 1rem; }}
+  .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 11px; font-weight: 600; }}
+  .badge.passed {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
+  .badge.filtered {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
+  .badge.already_positioned {{ background: rgba(79, 140, 255, 0.15); color: var(--accent); }}
+  .reason {{ color: var(--text-dim); }}
+  details.decision-log {{ margin-top: 2rem; }}
+  details.decision-log summary {{ cursor: pointer; font-weight: 600; font-size: 15px; padding: 0.5rem 0; list-style: none; }}
+  details.decision-log summary::-webkit-details-marker {{ display: none; }}
+  details.decision-log summary::before {{ content: "\\25b8"; display: inline-block; margin-right: 0.4rem; color: var(--text-dim); transition: transform 0.15s ease; }}
+  details.decision-log[open] summary::before {{ transform: rotate(90deg); }}
+  details.decision-log summary .count {{ color: var(--text-dim); font-weight: 400; }}
 </style>
 </head>
 <body>
 <h1>autotrader</h1>
-<div class="nav"><a href="/debug">Decision log &rarr;</a></div>
 
 {saved_banner}
 
@@ -132,6 +145,18 @@ _PAGE = """<!doctype html>
   {position_rows}
 </table>
 
+<details class="decision-log">
+  <summary>Decision log <span class="count">({decision_count} evaluated)</span></summary>
+  <p class="hint">Every match the trader has evaluated once it entered the lead-time window &mdash; i.e. the point it
+  actually decided whether to bet &mdash; with the filter outcome and, if skipped, why. Persisted every tick, so this
+  is history, not a live snapshot.</p>
+  {decision_truncated_note}
+  <table>
+    <tr><th>Scanned at</th><th>Match</th><th>Status</th><th>Reason / detail</th></tr>
+    {decision_rows}
+  </table>
+</details>
+
 </body>
 </html>
 """
@@ -139,6 +164,19 @@ _PAGE = """<!doctype html>
 _ROW = (
     "<tr><td>{event}</td><td>{status}</td><td>{ticker}</td><td>{contracts}</td>"
     "<td>${entry:.2f}</td><td>{exit}</td><td>{reason}</td><td>{mode}</td></tr>"
+)
+
+_DECISION_STATUS_LABELS = {
+    "passed": "Passed",
+    "filtered": "Filtered out",
+    "already_positioned": "Already positioned",
+}
+
+_DECISION_ROW = (
+    "<tr><td>{scanned_at}</td>"
+    "<td>{teams}<br><span class=\"reason\">{event_ticker}</span></td>"
+    "<td><span class=\"badge {status}\">{status_label}</span></td>"
+    "<td class=\"reason\">{detail}</td></tr>"
 )
 
 
@@ -153,6 +191,32 @@ def _position_row(position: dict) -> str:
         exit=f"${float(exit_price):.2f}" if exit_price is not None else "-",
         reason=html.escape(str(position.get("exit_reason", "-"))),
         mode="dry-run" if position.get("dry_run", True) else "live",
+    )
+
+
+def _as_float(value) -> float | None:
+    return float(value) if isinstance(value, Decimal) else value
+
+
+def _decision_passed_detail(item: dict) -> str:
+    return (
+        f"side: {html.escape(item.get('side_team_name') or '')} &middot; "
+        f"entry: ${_as_float(item.get('entry_price_dollars')):.2f} &middot; "
+        f"win prob: {_as_float(item.get('win_prob_percent')):.1f}% &middot; "
+        f"volume: {_as_float(item.get('volume')):.0f}"
+    )
+
+
+def _decision_row(item: dict) -> str:
+    status = item.get("status", "")
+    detail = _decision_passed_detail(item) if status == "passed" else html.escape(item.get("reason") or "")
+    return _DECISION_ROW.format(
+        scanned_at=html.escape(item.get("scanned_at", "")),
+        teams=html.escape(" vs ".join(item.get("team_names", []))),
+        event_ticker=html.escape(item.get("event_ticker", "")),
+        status=status,
+        status_label=_DECISION_STATUS_LABELS.get(status, status),
+        detail=detail,
     )
 
 
@@ -179,8 +243,20 @@ def _last_applied_text(config: TradingConfig) -> str:
     return f"Filters last applied {ago}. {scope}"
 
 
-def render_dashboard(config: TradingConfig, positions: list[dict], saved: bool = False) -> str:
+def render_dashboard(
+    config: TradingConfig,
+    positions: list[dict],
+    market_scans: list[dict],
+    saved: bool = False,
+) -> str:
     sorted_positions = sorted(positions, key=lambda p: p.get("entry_time", ""), reverse=True)
+    sorted_scans = sorted(market_scans, key=lambda r: r.get("scanned_at", ""), reverse=True)
+    shown_scans = sorted_scans[:MAX_DECISION_ROWS_DISPLAYED]
+    decision_truncated_note = (
+        f'<p class="hint">Showing the {MAX_DECISION_ROWS_DISPLAYED} most recent of {len(sorted_scans)} recorded decisions.</p>'
+        if len(sorted_scans) > MAX_DECISION_ROWS_DISPLAYED
+        else ""
+    )
     return _PAGE.format(
         saved_banner=(
             '<div class="banner saved">&#10003; Filters applied. The running loop will use these values on its '
@@ -212,4 +288,7 @@ def render_dashboard(config: TradingConfig, positions: list[dict], saved: bool =
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
         position_rows="".join(_position_row(p) for p in sorted_positions) or "<tr><td colspan=8>none yet</td></tr>",
+        decision_count=len(sorted_scans),
+        decision_truncated_note=decision_truncated_note,
+        decision_rows="".join(_decision_row(r) for r in shown_scans) or "<tr><td colspan=4>no decisions recorded yet</td></tr>",
     )

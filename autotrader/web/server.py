@@ -8,7 +8,6 @@ from autotrader.storage.config import load_config, save_config
 from autotrader.storage.state import Store
 from autotrader.web.auth import is_authorized
 from autotrader.web.dashboard import render_dashboard
-from autotrader.web.debug_view import render_debug_view
 
 logger = logging.getLogger("autotrader.web")
 
@@ -71,9 +70,12 @@ def build_handler(store: Store, username: str, password: str) -> type[BaseHTTPRe
                 return
             if parsed.path == "/":
                 saved = "saved" in parse_qs(parsed.query)
-                self._send_html(200, render_dashboard(load_config(store), store.list_positions(), saved=saved))
-            elif parsed.path == "/debug":
-                self._send_html(200, render_debug_view(store.list_market_scans()))
+                self._send_html(
+                    200,
+                    render_dashboard(
+                        load_config(store), store.list_positions(), store.list_market_scans(), saved=saved
+                    ),
+                )
             elif parsed.path == "/api/positions":
                 self._send_json(200, store.list_positions())
             else:
