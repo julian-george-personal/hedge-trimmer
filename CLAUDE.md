@@ -26,6 +26,11 @@ until curl -sf http://127.0.0.1:8420 >/dev/null; do sleep 1; done
 `Address already in use` on relaunch means a prior instance is still up —
 find and kill it first: `lsof -ti:8420 -sTCP:LISTEN | xargs -r kill`.
 
+If the server was already running before you started testing (e.g. the user
+had it up), leave it running when you're done: if you had to kill/restart it
+during testing, restart it afterward so it ends up back in the state you
+found it.
+
 ## Driving it with Playwright
 
 `chromium-cli` is not installed in this environment. Instead, `playwright`
@@ -62,15 +67,44 @@ are blocked otherwise.
 ## Frontend structure
 
 Static UI lives in `analysis/static/`, served by `analysis/server.py`. No
-build step — edit and reload. There are two pages, sharing `base.css` (CSS
-vars, body reset, top nav bar) and switchable via the nav links each renders:
+build step — edit and reload. It's a single-page app: `index.html` is the
+only document, containing both views' markup permanently mounted as
+`#explorer-view` and `#analysis-view`. `app.js` toggles which one is visible
+(via `hidden`) when a nav link is clicked — it never navigates — so
+switching views keeps all JS state (selected match, chart, filters, widget
+order) alive and never re-triggers a fetch. `server.py` still serves
+`/explorer.html` and `/analysis.html` as real routes (both return
+`index.html`'s bytes) purely so bookmarks/reloads land on the right view;
+`app.js` reads `location.pathname` on load to pick the initial view and
+uses `history.pushState`/`popstate` to keep the URL in sync with nav clicks.
 
-- `explorer.html` / `explorer.js` / `explorer.css` — the match explorer
-  (sidebar list + chart), the original single-page UI.
-- `analysis.html` / `analysis.js` / `analysis.css` — ad hoc analysis
-  widgets, currently a placeholder.
+Files:
+- `shared.js` — `fetchJson` plus `loadEvents()`, a memoized `/api/events`
+  fetch shared by both views so it only ever runs once per page load.
+- `explorer.js` / `explorer.css` — the match explorer (sidebar list +
+  chart). `explorer.js`'s body is wrapped in an IIFE.
+- `analysis.js` / `analysis.css` — ad hoc analysis widgets. Also
+  IIFE-wrapped.
+- `base.css` — CSS vars, body reset, top nav bar, and the `.view`/
+  `.view[hidden]` rules that drive the view toggle (`.view` is `display:
+  contents` so the visible one's child participates directly in
+  `.page-body`'s flex layout).
 
-`index.html` is just a redirect to `/explorer.html` for the bare root URL.
+`explorer.js` and `analysis.js` both load in the same document now (as
+plain scripts, not modules), so any top-level `const`/`function` name used
+in both would collide — that's why each is IIFE-wrapped rather than
+deduplicated. They already duplicate several identically-named helpers
+(`state`, `formatVolume`, `sliderPositionToVolume`, `currentDateRange`,
+`applyDatePreset`, etc, some flagged by comments) — that duplication is
+intentional/existing, not something to clean up as a side effect of an
+unrelated change.
+
+Both views also had colliding element ids from when they were separate
+documents (`app`, `sidebar`, `search`, `search-bar`, `date-filter`,
+`date-from`, `date-to`). These are namespaced per view now — `explorer-*`
+prefix in explorer's markup/JS/CSS, `analysis-*` in analysis's — since HTML
+ids must be unique within one document. IDs that were already unique to one
+view (e.g. `chart`, `widgets`, `only-pandascore-start`) were left alone.
 
 Watch out for the `hidden` attribute: `explorer.js` toggles it via the
 `.hidden` IDL property (e.g. `el.hidden = true`), which relies on the
@@ -78,4 +112,5 @@ low-specificity UA rule `[hidden] { display: none }`. Any `#id { display:
 ... }` rule in `explorer.css` for that same element will silently win over
 it and keep the element (and its layout footprint) visible. If adding
 `display` rules for an element that also gets toggled via `.hidden`, pair it
-with an explicit `#id[hidden] { display: none; }` override.
+with an explicit `#id[hidden] { display: none; }` override — `base.css`'s
+`.view[hidden]` rule is exactly this pattern, one level up.

@@ -1,3 +1,4 @@
+(function () {
 const TEAM_COLORS = ["#4f8cff", "#e0a63f", "#3fbf7f", "#e0555a"];
 
 // Favorite (higher win probability) is always blue, underdog always orange —
@@ -27,13 +28,11 @@ const state = {
   chart: null,
   matchStartAt: null,
   maxVolume: 0,
+  maxPreMatchVolume: 0,
+  totalVolumeFilter: null,
+  preMatchVolumeFilter: null,
   visibleCount: MARKETS_PAGE_SIZE,
 };
-
-async function fetchJson(url) {
-  const res = await fetch(url);
-  return res.json();
-}
 
 function eventMatchesQuery(event, query) {
   const haystack = `${event.title} ${event.event_ticker}`.toLowerCase();
@@ -51,27 +50,76 @@ function formatVolume(volume) {
 // sweeps midpoint -> max. This gives fine control around the (heavily
 // right-skewed) bulk of the distribution instead of cramming it into a
 // sliver of the range.
-function sliderPositionToVolume(position) {
-  if (position <= 0 || state.maxVolume <= 0) return 0;
-  if (position >= VOLUME_SLIDER_STEPS) return state.maxVolume;
+function sliderPositionToVolume(position, maxVolume) {
+  if (position <= 0 || maxVolume <= 0) return 0;
+  if (position >= VOLUME_SLIDER_STEPS) return maxVolume;
 
   const half = VOLUME_SLIDER_STEPS / 2;
-  const midVolume = Math.min(VOLUME_SLIDER_MIDPOINT, state.maxVolume);
+  const midVolume = Math.min(VOLUME_SLIDER_MIDPOINT, maxVolume);
 
   if (position <= half) {
     const floor = 1;
     return floor * Math.pow(midVolume / floor, position / half);
   }
-  return midVolume * Math.pow(state.maxVolume / midVolume, (position - half) / half);
+  return midVolume * Math.pow(maxVolume / midVolume, (position - half) / half);
 }
 
-function currentMinVolume() {
-  const position = Number(document.getElementById("min-volume").value);
-  return sliderPositionToVolume(position);
-}
+// Drives one "min – max" dual-thumb volume slider (two overlapping <input
+// type=range> elements sharing a track — see .range-slider in explorer.css).
+// `getMaxVolume` is read lazily since the domain (state.maxVolume or
+// state.maxPreMatchVolume) isn't known until data has loaded.
+function createVolumeRangeFilter(prefix, { getMaxVolume, onChange }) {
+  const minInput = document.getElementById(`${prefix}-min`);
+  const maxInput = document.getElementById(`${prefix}-max`);
+  const label = document.getElementById(`${prefix}-label`);
+  const fill = document.getElementById(`${prefix}-fill`);
+  const container = document.getElementById(`${prefix}-filter`);
+  let enabled = true;
 
-function updateMinVolumeLabel() {
-  document.getElementById("min-volume-label").textContent = formatVolume(currentMinVolume());
+  function currentRange() {
+    const maxVolume = getMaxVolume();
+    return {
+      min: sliderPositionToVolume(Number(minInput.value), maxVolume),
+      max: sliderPositionToVolume(Number(maxInput.value), maxVolume),
+    };
+  }
+
+  function refresh() {
+    const minPct = (Number(minInput.value) / VOLUME_SLIDER_STEPS) * 100;
+    const maxPct = (Number(maxInput.value) / VOLUME_SLIDER_STEPS) * 100;
+    fill.style.left = `${minPct}%`;
+    fill.style.right = `${100 - maxPct}%`;
+
+    const { min, max } = currentRange();
+    label.textContent = `${formatVolume(min)} – ${formatVolume(max)}`;
+  }
+
+  minInput.addEventListener("input", () => {
+    if (Number(minInput.value) > Number(maxInput.value)) minInput.value = maxInput.value;
+    refresh();
+    onChange();
+  });
+  maxInput.addEventListener("input", () => {
+    if (Number(maxInput.value) < Number(minInput.value)) maxInput.value = minInput.value;
+    refresh();
+    onChange();
+  });
+
+  return {
+    currentRange,
+    isEnabled: () => enabled,
+    setEnabled(next) {
+      enabled = next;
+      minInput.disabled = !enabled;
+      maxInput.disabled = !enabled;
+      container.classList.toggle("loading", !enabled);
+      if (enabled) {
+        refresh();
+      } else {
+        label.textContent = "Loading…";
+      }
+    },
+  };
 }
 
 function toDateInputValue(date) {
@@ -79,8 +127,8 @@ function toDateInputValue(date) {
 }
 
 function currentDateRange() {
-  const from = document.getElementById("date-from").value;
-  const to = document.getElementById("date-to").value;
+  const from = document.getElementById("explorer-date-from").value;
+  const to = document.getElementById("explorer-date-to").value;
   return { from, to };
 }
 
@@ -93,8 +141,8 @@ function eventInDateRange(event, { from, to }) {
 
 function applyDatePreset(preset) {
   const today = new Date();
-  const fromInput = document.getElementById("date-from");
-  const toInput = document.getElementById("date-to");
+  const fromInput = document.getElementById("explorer-date-from");
+  const toInput = document.getElementById("explorer-date-to");
 
   if (preset === "all") {
     fromInput.value = "";
@@ -179,10 +227,11 @@ function buildDateGroup(group) {
 }
 
 function renderMarketList({ resetPaging = true } = {}) {
-  const query = document.getElementById("search").value.trim();
-  const minVolume = currentMinVolume();
+  const query = document.getElementById("explorer-search").value.trim();
+  const totalVolumeRange = state.totalVolumeFilter.currentRange();
+  const preMatchVolumeRange = state.preMatchVolumeFilter.currentRange();
+  const preMatchVolumeActive = state.preMatchVolumeFilter.isEnabled();
   const dateRange = currentDateRange();
-  updateMinVolumeLabel();
   const container = document.getElementById("market-list");
   container.innerHTML = "";
   state.activeIndex = -1;
@@ -191,7 +240,11 @@ function renderMarketList({ resetPaging = true } = {}) {
   const matches = state.events.filter(
     (event) =>
       (!query || eventMatchesQuery(event, query)) &&
-      event.volume >= minVolume &&
+      event.volume >= totalVolumeRange.min &&
+      event.volume <= totalVolumeRange.max &&
+      (!preMatchVolumeActive ||
+        ((event.pre_match_volume ?? 0) >= preMatchVolumeRange.min &&
+          (event.pre_match_volume ?? 0) <= preMatchVolumeRange.max)) &&
       eventInDateRange(event, dateRange)
   );
 
@@ -465,12 +518,12 @@ async function selectEvent(event) {
 
 function setSidebarWidth(width) {
   const clamped = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
-  document.getElementById("app").style.setProperty("--sidebar-width", `${clamped}px`);
+  document.getElementById("explorer-root").style.setProperty("--sidebar-width", `${clamped}px`);
   localStorage.setItem("sidebarWidth", String(clamped));
 }
 
 function setSidebarCollapsed(collapsed) {
-  document.getElementById("app").classList.toggle("sidebar-collapsed", collapsed);
+  document.getElementById("explorer-root").classList.toggle("sidebar-collapsed", collapsed);
   const toggle = document.getElementById("sidebar-toggle");
   toggle.textContent = collapsed ? "›" : "‹";
   toggle.setAttribute("aria-label", collapsed ? "Show sidebar" : "Hide sidebar");
@@ -485,13 +538,13 @@ function restoreSidebarState() {
 
 function setupSidebarToggle() {
   document.getElementById("sidebar-toggle").addEventListener("click", () => {
-    const collapsed = !document.getElementById("app").classList.contains("sidebar-collapsed");
+    const collapsed = !document.getElementById("explorer-root").classList.contains("sidebar-collapsed");
     setSidebarCollapsed(collapsed);
   });
 }
 
 function setupSidebarResize() {
-  const app = document.getElementById("app");
+  const app = document.getElementById("explorer-root");
   const handle = document.getElementById("sidebar-resize-handle");
 
   handle.addEventListener("mousedown", (e) => {
@@ -521,7 +574,7 @@ function setupChartResize() {
 }
 
 function setupKeyboardNav() {
-  document.getElementById("search").addEventListener("keydown", (e) => {
+  document.getElementById("explorer-search").addEventListener("keydown", (e) => {
     const rows = [...document.querySelectorAll(".suggestion-row")];
     if (rows.length === 0) return;
 
@@ -543,9 +596,9 @@ function setupKeyboardNav() {
 }
 
 function setupDateFilter() {
-  document.getElementById("date-from").addEventListener("change", () => renderMarketList());
-  document.getElementById("date-to").addEventListener("change", () => renderMarketList());
-  document.querySelectorAll(".date-presets button").forEach((button) => {
+  document.getElementById("explorer-date-from").addEventListener("change", () => renderMarketList());
+  document.getElementById("explorer-date-to").addEventListener("change", () => renderMarketList());
+  document.querySelectorAll("#explorer-date-filter .date-presets button").forEach((button) => {
     button.addEventListener("click", () => applyDatePreset(button.dataset.preset));
   });
 }
@@ -557,12 +610,37 @@ function setupLoadMore() {
   });
 }
 
+// Pre-match volume takes a slow full candle scan to compute server-side (see
+// analysis/pre_match_volume.py), so it's fetched separately from /api/events
+// and the filter stays disabled ("Loading…") until it arrives.
+async function loadPreMatchVolume() {
+  const preMatchVolumeByTicker = await fetchJson("/api/pre-match-volume");
+  state.events.forEach((event) => {
+    event.pre_match_volume = preMatchVolumeByTicker[event.event_ticker] ?? 0;
+  });
+  state.maxPreMatchVolume = Math.max(0, ...state.events.map((event) => event.pre_match_volume));
+  state.preMatchVolumeFilter.setEnabled(true);
+  renderMarketList({ resetPaging: false });
+}
+
 async function init() {
-  state.events = await fetchJson("/api/events");
+  state.events = await loadEvents();
   state.maxVolume = Math.max(0, ...state.events.map((event) => event.volume));
+
+  state.totalVolumeFilter = createVolumeRangeFilter("total-volume", {
+    getMaxVolume: () => state.maxVolume,
+    onChange: () => renderMarketList(),
+  });
+  state.totalVolumeFilter.setEnabled(true);
+
+  state.preMatchVolumeFilter = createVolumeRangeFilter("pre-match-volume", {
+    getMaxVolume: () => state.maxPreMatchVolume,
+    onChange: () => renderMarketList(),
+  });
+  state.preMatchVolumeFilter.setEnabled(false);
+
   renderMarketList();
-  document.getElementById("search").addEventListener("input", () => renderMarketList());
-  document.getElementById("min-volume").addEventListener("input", () => renderMarketList());
+  document.getElementById("explorer-search").addEventListener("input", () => renderMarketList());
   setupDateFilter();
   setupLoadMore();
   setupKeyboardNav();
@@ -570,6 +648,8 @@ async function init() {
   setupSidebarToggle();
   setupSidebarResize();
   setupChartResize();
+  loadPreMatchVolume();
 }
 
 init();
+})();

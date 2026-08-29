@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analysis.data import get_candles, list_events
 from analysis.pandascore import find_match_start
+from analysis.pre_match_volume import list_pre_match_volume
 from analysis.price_spike import list_price_spike_stats
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -28,6 +29,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"begin_at": find_match_start(event)})
         elif parsed.path == "/api/price-spike-stats":
             self._send_json(list_price_spike_stats())
+        elif parsed.path == "/api/pre-match-volume":
+            self._send_json(list_pre_match_volume())
         else:
             self._send_static(parsed.path)
 
@@ -40,7 +43,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_static(self, url_path: str) -> None:
-        relative_path = "index.html" if url_path == "/" else url_path.lstrip("/")
+        # explorer.html and analysis.html are client-side views within the
+        # single-page app served from index.html, not separate documents.
+        if url_path in ("/", "/explorer.html", "/analysis.html"):
+            relative_path = "index.html"
+        else:
+            relative_path = url_path.lstrip("/")
         file_path = (STATIC_DIR / relative_path).resolve()
         if STATIC_DIR not in file_path.parents or not file_path.is_file():
             self.send_error(404)

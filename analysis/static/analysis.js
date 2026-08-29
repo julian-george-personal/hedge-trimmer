@@ -1,3 +1,4 @@
+(function () {
 const VOLUME_SLIDER_STEPS = 1000;
 const VOLUME_SLIDER_MIDPOINT = 100_000;
 
@@ -25,9 +26,86 @@ const state = {
   thresholdPercent: DEFAULT_THRESHOLD_PERCENT,
 };
 
-async function fetchJson(url) {
-  const res = await fetch(url);
-  return res.json();
+const WIDGET_ORDER_COOKIE = "widget-order";
+
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function setCookie(name, value, days) {
+  const expires = new Date(Date.now() + days * 864e5).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; samesite=lax`;
+}
+
+function saveWidgetOrder(container) {
+  const order = [...container.querySelectorAll(".widget")].map((widget) => widget.id);
+  setCookie(WIDGET_ORDER_COOKIE, JSON.stringify(order), 365);
+}
+
+function loadWidgetOrder() {
+  const raw = getCookie(WIDGET_ORDER_COOKIE);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+// Reorders the already-appended widgets to match a saved order; ids that no
+// longer exist (or new widgets not yet in the saved order) are left where
+// appendChild put them.
+function applyWidgetOrder(container, order) {
+  if (!order) return;
+  for (const id of order) {
+    const widget = document.getElementById(id);
+    if (widget && widget.parentElement === container) container.appendChild(widget);
+  }
+}
+
+// Finds the widget whose vertical center the cursor is currently above, so
+// the dragged widget can be inserted just before it (or at the end, if the
+// cursor is below every widget).
+function getDragAfterElement(container, cursorY) {
+  const others = [...container.querySelectorAll(".widget:not(.dragging)")];
+  return others.reduce(
+    (closest, widget) => {
+      const box = widget.getBoundingClientRect();
+      const offset = cursorY - box.top - box.height / 2;
+      return offset < 0 && offset > closest.offset ? { offset, element: widget } : closest;
+    },
+    { offset: Number.NEGATIVE_INFINITY, element: null }
+  ).element;
+}
+
+// Wires up drag handles so widgets can be reordered by mouse, and persists
+// the resulting order to a cookie once a drag completes.
+function setupWidgetDragAndDrop(container) {
+  container.querySelectorAll(".widget-drag-handle").forEach((handle) => {
+    handle.addEventListener("dragstart", (event) => {
+      const widget = handle.closest(".widget");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", widget.id);
+      event.dataTransfer.setDragImage(widget, 20, 20);
+      setTimeout(() => widget.classList.add("dragging"), 0);
+    });
+    handle.addEventListener("dragend", () => {
+      handle.closest(".widget").classList.remove("dragging");
+      saveWidgetOrder(container);
+    });
+  });
+
+  container.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    const dragging = container.querySelector(".widget.dragging");
+    if (!dragging) return;
+    const afterElement = getDragAfterElement(container, event.clientY);
+    if (afterElement == null) container.appendChild(dragging);
+    else container.insertBefore(dragging, afterElement);
+  });
+
+  container.addEventListener("drop", (event) => event.preventDefault());
 }
 
 function formatVolume(volume) {
@@ -57,6 +135,12 @@ function currentMinVolume() {
   return sliderPositionToVolume(position, state.maxVolume);
 }
 
+// Win-probability sliders use the same 0-1000 step range as the volume
+// sliders but map linearly onto 0-100%, since price is already bounded.
+function sliderPositionToPercent(position) {
+  return (position / VOLUME_SLIDER_STEPS) * 100;
+}
+
 function updateMinVolumeLabel() {
   document.getElementById("min-volume-label").textContent = formatVolume(currentMinVolume());
 }
@@ -66,8 +150,8 @@ function toDateInputValue(date) {
 }
 
 function currentDateRange() {
-  const from = document.getElementById("date-from").value;
-  const to = document.getElementById("date-to").value;
+  const from = document.getElementById("analysis-date-from").value;
+  const to = document.getElementById("analysis-date-to").value;
   return { from, to };
 }
 
@@ -85,8 +169,8 @@ function eventMatchesQuery(event, query) {
 
 function applyDatePreset(preset) {
   const today = new Date();
-  const fromInput = document.getElementById("date-from");
-  const toInput = document.getElementById("date-to");
+  const fromInput = document.getElementById("analysis-date-from");
+  const toInput = document.getElementById("analysis-date-to");
 
   if (preset === "all") {
     fromInput.value = "";
@@ -119,7 +203,7 @@ function eventHasPandascoreStart(event) {
 }
 
 function sidebarFilteredEvents() {
-  const query = document.getElementById("search").value.trim();
+  const query = document.getElementById("analysis-search").value.trim();
   const dateRange = currentDateRange();
   const onlyPandascoreStart = document.getElementById("only-pandascore-start").checked;
 
@@ -157,28 +241,55 @@ function eventStatPairs(events) {
     .filter((pair) => pair.stat);
 }
 
-function spikeResult(stats, side, thresholdPercent) {
-  if (stats.length === 0) return { count: 0, total: 0 };
+// Price is a bid/ask midpoint capped at $1 (a contract settles at $0 or
+// $1), so a threshold implying a target above $1 can never be hit no matter
+// the match outcome. Counting those matches as "total loss" bets would
+// score a bet no rational trader would place; exclude them from the
+// eligible set instead of folding them into the miss column.
+const PRICE_CEILING = 1;
+
+function isThresholdReachable(startPrice, factor) {
+  return factor * startPrice <= PRICE_CEILING;
+}
+
+// stopLossPercent, when > 0, marks a match as "stopped out" (rather than a
+// full loss) if its price ever fell to or below that fraction of the start
+// price without first reaching the take-profit threshold — see
+// expectedValuePerBet.
+function spikeResult(stats, side, thresholdPercent, stopLossPercent = 0) {
   const factor = thresholdPercent / 100;
-  const count = stats.filter((stat) => {
-    const startPrice = stat[`${side}_start_price`];
-    const maxPrice = stat[`${side}_max_price`];
-    return maxPrice >= factor * startPrice;
-  }).length;
-  return { count, total: stats.length };
+  const stopLossFactor = stopLossPercent / 100;
+  const startKey = `${side}_start_price`;
+  const eligible = stats.filter((stat) => isThresholdReachable(stat[startKey], factor));
+  if (eligible.length === 0) return { count: 0, total: 0, stopped: 0 };
+
+  let count = 0;
+  let stopped = 0;
+  for (const stat of eligible) {
+    if (stat[`${side}_max_price`] >= factor * stat[startKey]) {
+      count++;
+    } else if (stopLossFactor > 0 && stat[`${side}_min_price`] <= stopLossFactor * stat[startKey]) {
+      stopped++;
+    }
+  }
+  return { count, total: eligible.length, stopped };
 }
 
 // Samples the EV formula across the whole threshold range so the curve
 // widget can plot expected profit as a function of the exit threshold. The
 // true curve is a step function (hit rate only changes at each match's own
 // max/start ratio) that's linear between steps; sampling every integer
-// percentage point renders that closely enough at chart resolution.
-function computeEvCurve(stats, side) {
+// percentage point renders that closely enough at chart resolution. The
+// eligible set shrinks as the threshold rises (see isThresholdReachable),
+// so it can reach zero before EV_CURVE_MAX_THRESHOLD — stop there rather
+// than discarding the points already computed.
+function computeEvCurve(stats, side, stopLossPercent = 0) {
   const points = [];
   for (let threshold = EV_CURVE_MIN_THRESHOLD; threshold <= EV_CURVE_MAX_THRESHOLD; threshold += EV_CURVE_STEP) {
-    const { count, total } = spikeResult(stats, side, threshold);
-    if (total === 0) return [];
-    points.push({ increase: threshold - EV_CURVE_MIN_THRESHOLD, ev: expectedValuePerBet(count / total, threshold) });
+    const { count, total, stopped } = spikeResult(stats, side, threshold, stopLossPercent);
+    if (total === 0) break;
+    const ev = expectedValuePerBet(count / total, threshold, stopped / total, stopLossPercent);
+    points.push({ increase: threshold - EV_CURVE_MIN_THRESHOLD, ev });
   }
   return points;
 }
@@ -332,16 +443,96 @@ function hideChartMessage(widget) {
   widget.querySelector(".chart-message").hidden = true;
 }
 
-// config: { id, title, volumeLabel, volumeOf(pair), maxVolume() } — volumeOf
-// reads the filter value off an { event, stat } pair (see eventStatPairs),
-// so the same widget shape can filter by an event-level field (total
-// volume) or a stat-level one (volume before match start).
+// Builds one labeled min/max slider (markup matches the styling in
+// analysis.css, which is written generically so any number of these can be
+// stacked in one widget) and wires the two thumbs to keep min <= max.
+function buildDualRangeControl(id, labelText, onChange) {
+  const container = document.createElement("div");
+  container.className = "range-control";
+  container.id = id;
+  container.innerHTML = `
+    <label>${labelText}: <span class="range-label"></span> <span class="range-sample-size"></span></label>
+    <div class="dual-range">
+      <div class="dual-range-track"></div>
+      <div class="dual-range-fill"></div>
+      <input type="range" class="range-min" min="0" max="1000" step="1" value="0" />
+      <input type="range" class="range-max" min="0" max="1000" step="1" value="1000" />
+    </div>
+  `;
+
+  const els = {
+    container,
+    rangeLabel: container.querySelector(".range-label"),
+    rangeSampleSize: container.querySelector(".range-sample-size"),
+    rangeFill: container.querySelector(".dual-range-fill"),
+    rangeMin: container.querySelector(".range-min"),
+    rangeMax: container.querySelector(".range-max"),
+  };
+
+  [els.rangeMin, els.rangeMax].forEach((input) => {
+    input.addEventListener("input", () => {
+      if (Number(els.rangeMin.value) > Number(els.rangeMax.value)) {
+        const clampTo = input === els.rangeMin ? els.rangeMax : els.rangeMin;
+        clampTo.value = input.value;
+      }
+      onChange();
+    });
+  });
+
+  return els;
+}
+
+// Positions a .single-range's fill bar to match its slider's current value,
+// so a lone slider fills the same way a .dual-range's does (see
+// buildDualRangeControl) instead of relying on the browser's native track.
+function updateSingleRangeFill(container) {
+  const slider = container.querySelector("input[type=range]");
+  const pct = ((Number(slider.value) - Number(slider.min)) / (Number(slider.max) - Number(slider.min))) * 100;
+  container.querySelector(".single-range-fill").style.width = `${pct}%`;
+}
+
+// Single slider styled like .dual-range (see buildDualRangeControl) for the
+// EV-curve widget's optional stop-loss: sell if price falls to or below
+// this % of the start price, instead of always riding a miss to a total loss.
+function buildStopLossControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "range-control percent-control";
+  container.innerHTML = `
+    <label>Stop-loss — sell if price falls to &le; <span class="range-label"></span> of price at match start</label>
+    <div class="single-range">
+      <div class="single-range-track"></div>
+      <div class="single-range-fill"></div>
+      <input type="range" class="stop-loss-slider" min="0" max="100" step="1" value="0" />
+    </div>
+  `;
+
+  const slider = container.querySelector(".stop-loss-slider");
+  slider.addEventListener("input", () => {
+    updateSingleRangeFill(container);
+    onChange();
+  });
+  updateSingleRangeFill(container);
+  return { container, slider, label: container.querySelector(".range-label") };
+}
+
+// config: { id, title, volumeLabel, volumeOf(pair), maxVolume(), winProbFilter? }
+// — volumeOf reads the filter value off an { event, stat } pair (see
+// eventStatPairs), so the same widget shape can filter by an event-level
+// field (total volume) or a stat-level one (volume before match start).
+// winProbFilter, when true, adds a second slider filtering by the currently
+// selected side's implied win probability (share price) at match start.
+// stopLoss, when true, adds a slider that makes matches which never hit the
+// take-profit threshold but did fall to or below it a smaller ("stopped
+// out") loss instead of a total one — see expectedValuePerBet.
 function buildEvCurveWidget(config) {
   const widget = document.createElement("div");
   widget.className = "widget widget-wide";
   widget.id = config.id;
   widget.innerHTML = `
-    <h2>${config.title}</h2>
+    <div class="widget-header">
+      <span class="widget-drag-handle" draggable="true" title="Drag to reorder">⠿</span>
+      <h2>${config.title}</h2>
+    </div>
     <div class="side-toggle" role="group" aria-label="Side">
       <button type="button" data-side="underdog" class="active">Underdog</button>
       <button type="button" data-side="overdog">Overdog</button>
@@ -351,44 +542,30 @@ function buildEvCurveWidget(config) {
       <div class="chart-message" hidden></div>
       <div class="chart-tooltip" hidden></div>
     </div>
-    <div class="range-control">
-      <label>${config.volumeLabel}: <span class="range-label"></span> <span class="range-sample-size"></span></label>
-      <div class="dual-range">
-        <div class="dual-range-track"></div>
-        <div class="dual-range-fill"></div>
-        <input type="range" class="range-min" min="0" max="1000" step="1" value="0" />
-        <input type="range" class="range-max" min="0" max="1000" step="1" value="1000" />
-      </div>
-    </div>
+    <div class="range-controls"></div>
   `;
 
+  const local = { side: "underdog" };
+  const update = () => updateEvCurveWidget(widget, els, local, config);
+
+  const rangeControls = widget.querySelector(".range-controls");
   const els = {
     svg: widget.querySelector(".ev-chart"),
     tooltip: widget.querySelector(".chart-tooltip"),
-    rangeLabel: widget.querySelector(".range-label"),
-    rangeSampleSize: widget.querySelector(".range-sample-size"),
-    rangeFill: widget.querySelector(".dual-range-fill"),
-    rangeMin: widget.querySelector(".range-min"),
-    rangeMax: widget.querySelector(".range-max"),
+    volume: buildDualRangeControl("volume-range", config.volumeLabel, update),
+    winProb: config.winProbFilter
+      ? buildDualRangeControl("winprob-range", "Side's win probability at match start", update)
+      : null,
+    stopLoss: config.stopLoss ? buildStopLossControl(update) : null,
   };
-  const local = { side: "underdog" };
-
-  const update = () => updateEvCurveWidget(widget, els, local, config);
+  rangeControls.appendChild(els.volume.container);
+  if (els.winProb) rangeControls.appendChild(els.winProb.container);
+  if (els.stopLoss) rangeControls.appendChild(els.stopLoss.container);
 
   widget.querySelectorAll(".side-toggle button").forEach((button) => {
     button.addEventListener("click", () => {
       local.side = button.dataset.side;
       widget.querySelectorAll(".side-toggle button").forEach((b) => b.classList.toggle("active", b === button));
-      update();
-    });
-  });
-
-  [els.rangeMin, els.rangeMax].forEach((input) => {
-    input.addEventListener("input", () => {
-      if (Number(els.rangeMin.value) > Number(els.rangeMax.value)) {
-        const clampTo = input === els.rangeMin ? els.rangeMax : els.rangeMin;
-        clampTo.value = input.value;
-      }
       update();
     });
   });
@@ -399,26 +576,49 @@ function buildEvCurveWidget(config) {
 
 function updateEvCurveWidget(widget, els, local, config) {
   const maxVolumeForScale = config.maxVolume();
-  const minVolume = sliderPositionToVolume(Number(els.rangeMin.value), maxVolumeForScale);
-  const maxPosition = Number(els.rangeMax.value);
-  const maxVolume = maxPosition >= 1000 ? Infinity : sliderPositionToVolume(maxPosition, maxVolumeForScale);
-  els.rangeLabel.textContent = `${formatVolume(minVolume)} – ${maxPosition >= 1000 ? "max" : formatVolume(maxVolume)}`;
-  els.rangeFill.style.left = `${Number(els.rangeMin.value) / 10}%`;
-  els.rangeFill.style.right = `${100 - maxPosition / 10}%`;
+  const minVolume = sliderPositionToVolume(Number(els.volume.rangeMin.value), maxVolumeForScale);
+  const maxVolumePosition = Number(els.volume.rangeMax.value);
+  const maxVolume = maxVolumePosition >= 1000 ? Infinity : sliderPositionToVolume(maxVolumePosition, maxVolumeForScale);
+  els.volume.rangeLabel.textContent = `${formatVolume(minVolume)} – ${maxVolumePosition >= 1000 ? "max" : formatVolume(maxVolume)}`;
+  els.volume.rangeFill.style.left = `${Number(els.volume.rangeMin.value) / 10}%`;
+  els.volume.rangeFill.style.right = `${100 - maxVolumePosition / 10}%`;
+
+  let minWinProb = 0;
+  let maxWinProb = 100;
+  if (els.winProb) {
+    minWinProb = sliderPositionToPercent(Number(els.winProb.rangeMin.value));
+    maxWinProb = sliderPositionToPercent(Number(els.winProb.rangeMax.value));
+    els.winProb.rangeLabel.textContent = `${minWinProb.toFixed(0)}% – ${maxWinProb.toFixed(0)}%`;
+    els.winProb.rangeFill.style.left = `${Number(els.winProb.rangeMin.value) / 10}%`;
+    els.winProb.rangeFill.style.right = `${100 - Number(els.winProb.rangeMax.value) / 10}%`;
+  }
+
+  let stopLossPercent = 0;
+  if (els.stopLoss) {
+    stopLossPercent = Number(els.stopLoss.slider.value);
+    els.stopLoss.label.textContent = stopLossPercent === 0 ? "Off" : `${stopLossPercent}%`;
+  }
 
   if (!state.statsLoaded) {
-    els.rangeSampleSize.textContent = "";
+    els.volume.rangeSampleSize.textContent = "";
+    if (els.winProb) els.winProb.rangeSampleSize.textContent = "";
     showChartMessage(widget, "Loading match price data (first load can take a minute or two)…");
     return;
   }
 
   const pairs = eventStatPairs(sidebarFilteredEvents()).filter((pair) => {
     const volume = config.volumeOf(pair);
-    return volume >= minVolume && volume <= maxVolume;
+    if (volume < minVolume || volume > maxVolume) return false;
+    if (els.winProb) {
+      const winProb = pair.stat[`${local.side}_start_price`] * 100;
+      if (winProb < minWinProb || winProb > maxWinProb) return false;
+    }
+    return true;
   });
-  els.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
+  els.volume.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
+  if (els.winProb) els.winProb.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
 
-  const points = computeEvCurve(pairs.map((pair) => pair.stat), local.side);
+  const points = computeEvCurve(pairs.map((pair) => pair.stat), local.side, stopLossPercent);
   if (points.length === 0) {
     showChartMessage(widget, "No matches with usable price data in the current filters.");
     return;
@@ -435,7 +635,7 @@ const evCurveWidgetUpdaters = [];
 const TOTAL_VOLUME_CONFIG = {
   id: "widget-ev-curve",
   title: "Max price increase vs. expected profit",
-  volumeLabel: "Volume range",
+  volumeLabel: "Total volume range",
   volumeOf: (pair) => pair.event.volume,
   maxVolume: () => state.maxVolume,
 };
@@ -443,9 +643,11 @@ const TOTAL_VOLUME_CONFIG = {
 const PRE_MATCH_VOLUME_CONFIG = {
   id: "widget-ev-curve-prematch",
   title: "Max price increase vs. expected profit (by pre-match volume)",
-  volumeLabel: "Volume before match start",
+  volumeLabel: "Pre-match volume",
   volumeOf: (pair) => pair.stat.volume_before_start,
   maxVolume: () => state.maxVolumeBeforeStart,
+  winProbFilter: true,
+  stopLoss: true,
 };
 
 function buildPriceSpikeWidget() {
@@ -453,7 +655,10 @@ function buildPriceSpikeWidget() {
   widget.className = "widget";
   widget.id = "widget-price-spike";
   widget.innerHTML = `
-    <h2>Price spike vs. match start</h2>
+    <div class="widget-header">
+      <span class="widget-drag-handle" draggable="true" title="Drag to reorder">⠿</span>
+      <h2>Price spike vs. match start</h2>
+    </div>
     <div class="widget-controls">
       <div class="side-toggle" role="group" aria-label="Side">
         <button type="button" data-side="underdog" class="active">Underdog</button>
@@ -461,11 +666,19 @@ function buildPriceSpikeWidget() {
       </div>
       <div class="percent-control">
         <label for="threshold-slider">Max price reached &ge; <span id="threshold-label"></span> of price at match start</label>
-        <input id="threshold-slider" type="range" min="100" max="1000" step="0.1" value="${DEFAULT_THRESHOLD_PERCENT}" />
+        <div class="single-range">
+          <div class="single-range-track"></div>
+          <div class="single-range-fill"></div>
+          <input id="threshold-slider" type="range" min="100" max="1000" step="0.1" value="${DEFAULT_THRESHOLD_PERCENT}" />
+        </div>
       </div>
       <div id="volume-filter">
-        <label for="min-volume">Min volume: <span id="min-volume-label">0</span></label>
-        <input id="min-volume" type="range" min="0" max="1000" value="0" step="1" />
+        <label for="min-volume">Min total volume: <span id="min-volume-label">0</span></label>
+        <div class="single-range">
+          <div class="single-range-track"></div>
+          <div class="single-range-fill"></div>
+          <input id="min-volume" type="range" min="0" max="1000" value="0" step="1" />
+        </div>
       </div>
     </div>
     <div class="widget-result">
@@ -488,15 +701,21 @@ function buildPriceSpikeWidget() {
     });
   });
 
-  widget.querySelector("#threshold-slider").addEventListener("input", (e) => {
+  const thresholdSlider = widget.querySelector("#threshold-slider");
+  thresholdSlider.addEventListener("input", (e) => {
     state.thresholdPercent = Number(e.target.value);
+    updateSingleRangeFill(thresholdSlider.closest(".single-range"));
     updatePriceSpikeResult();
   });
+  updateSingleRangeFill(thresholdSlider.closest(".single-range"));
 
-  widget.querySelector("#min-volume").addEventListener("input", () => {
+  const minVolumeSlider = widget.querySelector("#min-volume");
+  minVolumeSlider.addEventListener("input", () => {
+    updateSingleRangeFill(minVolumeSlider.closest(".single-range"));
     updateMinVolumeLabel();
     updatePriceSpikeResult();
   });
+  updateSingleRangeFill(minVolumeSlider.closest(".single-range"));
 
   return widget;
 }
@@ -525,15 +744,22 @@ function updatePriceSpikeResult() {
 
   const pct = (100 * count) / total;
   resultEl.textContent = `${pct.toFixed(1)}%`;
-  detailEl.textContent = `${count} of ${total} matches (of the ${inScope.length} matching the current filters)`;
+  detailEl.textContent = `${count} of ${total} matches with a reachable target (of the ${inScope.length} matching the current filters)`;
 }
 
-// If the threshold is reached, selling there banks (threshold/100 - 1) profit;
-// otherwise this models the bet as a total loss (matches the widget's binary
-// hit/miss framing — see the "Sell the instant..." detail text).
-function expectedValuePerBet(winRate, thresholdPercent) {
+// If the take-profit threshold is reached, selling there banks
+// (thresholdPercent/100 - 1) profit. Failing that, if a stop-loss is set
+// (stopLossPercent > 0) and stoppedRate of matches fell to or below it,
+// selling there banks (stopLossPercent/100 - 1) — a smaller loss than
+// riding it out. Everything else is modeled as a total loss (matches the
+// widget's binary hit/miss framing — see the "Sell the instant..." detail
+// text). stoppedRate/stopLossPercent default to 0, which reduces this to
+// the plain hit-or-total-loss formula.
+function expectedValuePerBet(winRate, thresholdPercent, stoppedRate = 0, stopLossPercent = 0) {
+  const missRate = 1 - winRate - stoppedRate;
   const profitIfHit = thresholdPercent / 100 - 1;
-  return winRate * profitIfHit - (1 - winRate) * 1;
+  const profitIfStopped = stopLossPercent / 100 - 1;
+  return winRate * profitIfHit + stoppedRate * profitIfStopped - missRate * 1;
 }
 
 function updateExpectedValue(count, total, thresholdPercent) {
@@ -557,10 +783,10 @@ function renderAll() {
 }
 
 function setupFilters() {
-  document.getElementById("search").addEventListener("input", renderAll);
-  document.getElementById("date-from").addEventListener("change", renderAll);
-  document.getElementById("date-to").addEventListener("change", renderAll);
-  document.querySelectorAll(".date-presets button").forEach((button) => {
+  document.getElementById("analysis-search").addEventListener("input", renderAll);
+  document.getElementById("analysis-date-from").addEventListener("change", renderAll);
+  document.getElementById("analysis-date-to").addEventListener("change", renderAll);
+  document.querySelectorAll("#analysis-date-filter .date-presets button").forEach((button) => {
     button.addEventListener("click", () => applyDatePreset(button.dataset.preset));
   });
   document.getElementById("only-pandascore-start").addEventListener("change", renderAll);
@@ -579,9 +805,11 @@ async function init() {
   widgets.appendChild(buildPriceSpikeWidget());
   widgets.appendChild(buildEvCurveWidget(TOTAL_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(PRE_MATCH_VOLUME_CONFIG));
+  applyWidgetOrder(widgets, loadWidgetOrder());
+  setupWidgetDragAndDrop(widgets);
   setupFilters();
 
-  state.events = await fetchJson("/api/events");
+  state.events = await loadEvents();
   state.maxVolume = Math.max(0, ...state.events.map((event) => event.volume));
   updateMinVolumeLabel();
   renderAll();
@@ -590,3 +818,4 @@ async function init() {
 }
 
 init();
+})();

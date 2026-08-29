@@ -1,5 +1,6 @@
 import argparse
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from ingestion.clients.kalshi import KalshiClient
 from ingestion.extract.candles import fetch_candlesticks
 from ingestion.extract.markets import fetch_settled_markets
 from ingestion.load.parquet_store import DEFAULT_DATA_ROOT, write_candles, write_markets
+
+MARKET_RETRY_ATTEMPTS = 3
+MARKET_RETRY_BACKOFF_SECONDS = 5
 
 
 def parse_date_arg(date_str: str) -> datetime:
@@ -56,8 +60,16 @@ def main() -> None:
         markets = [m for m in markets if m["ticker"] in ticker_filter]
 
     for market in markets:
-        count = ingest_candles_for_market(client, args.series_ticker, market, args.data_root)
-        print(f"  {market['ticker']}: {count} candles")
+        for attempt in range(1, MARKET_RETRY_ATTEMPTS + 1):
+            try:
+                count = ingest_candles_for_market(client, args.series_ticker, market, args.data_root)
+                print(f"  {market['ticker']}: {count} candles")
+                break
+            except Exception as exc:
+                if attempt == MARKET_RETRY_ATTEMPTS:
+                    print(f"  {market['ticker']}: FAILED after {attempt} attempts ({exc})")
+                else:
+                    time.sleep(MARKET_RETRY_BACKOFF_SECONDS * attempt)
 
 
 if __name__ == "__main__":

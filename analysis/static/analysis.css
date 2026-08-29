@@ -1,11 +1,11 @@
-#app {
+#analysis-root {
   display: flex;
   flex-direction: row;
   flex: 1;
   min-height: 0;
 }
 
-#sidebar {
+#analysis-sidebar {
   width: 280px;
   flex-shrink: 0;
   display: flex;
@@ -15,7 +15,7 @@
   overflow-y: auto;
 }
 
-#search-bar {
+#analysis-search-bar {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -23,7 +23,7 @@
   border-bottom: 1px solid var(--border);
 }
 
-#search {
+#analysis-search {
   width: 100%;
   padding: 10px 14px;
   background: var(--bg);
@@ -33,12 +33,12 @@
   font-size: 14px;
 }
 
-#search:focus {
+#analysis-search:focus {
   outline: none;
   border-color: var(--accent);
 }
 
-#date-filter label {
+#analysis-date-filter label {
   display: block;
   color: var(--text-dim);
   font-size: 12px;
@@ -121,11 +121,6 @@
   font-weight: 500;
 }
 
-#min-volume {
-  width: 100%;
-  accent-color: var(--accent);
-}
-
 #filter-summary {
   padding: 14px 20px;
   color: var(--text-dim);
@@ -159,7 +154,31 @@
 
 .widget h2 {
   font-size: 14px;
+  margin: 0;
+}
+
+.widget-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 14px;
+}
+
+.widget-drag-handle {
+  cursor: grab;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  user-select: none;
+  touch-action: none;
+}
+
+.widget-drag-handle:active {
+  cursor: grabbing;
+}
+
+.widget.dragging {
+  opacity: 0.4;
 }
 
 .widget-controls {
@@ -206,11 +225,6 @@
 .percent-control label span {
   color: var(--text);
   font-weight: 500;
-}
-
-.percent-control input[type="range"] {
-  width: 100%;
-  accent-color: var(--accent);
 }
 
 .widget-result {
@@ -342,6 +356,10 @@
   font-weight: 600;
 }
 
+.range-control + .range-control {
+  margin-top: 16px;
+}
+
 .range-control label {
   display: block;
   color: var(--text-dim);
@@ -359,13 +377,22 @@
   font-weight: 400;
 }
 
-.dual-range {
+/* .single-range is the one-thumb counterpart of .dual-range — same track,
+   fill, and thumb styling, but the fill always starts at the left edge
+   (0) instead of tracking two independent thumbs. Keeping every rule below
+   shared between the two selectors is what keeps a lone slider (e.g. the
+   price-spike threshold, min-volume, or EV-curve stop-loss) looking like
+   the range sliders instead of a plain browser control. */
+.dual-range,
+.single-range {
   position: relative;
   height: 20px;
 }
 
 .dual-range-track,
-.dual-range-fill {
+.dual-range-fill,
+.single-range-track,
+.single-range-fill {
   position: absolute;
   top: 50%;
   height: 4px;
@@ -373,17 +400,24 @@
   transform: translateY(-50%);
 }
 
-.dual-range-track {
+.dual-range-track,
+.single-range-track {
   left: 0;
   right: 0;
   background: var(--border);
 }
 
-.dual-range-fill {
+.dual-range-fill,
+.single-range-fill {
   background: var(--accent);
 }
 
-.dual-range input[type="range"] {
+.single-range-fill {
+  left: 0;
+}
+
+.dual-range input[type="range"],
+.single-range input[type="range"] {
   position: absolute;
   top: 0;
   left: 0;
@@ -396,11 +430,13 @@
   pointer-events: none;
 }
 
-.dual-range input[type="range"]::-webkit-slider-runnable-track {
+.dual-range input[type="range"]::-webkit-slider-runnable-track,
+.single-range input[type="range"]::-webkit-slider-runnable-track {
   background: transparent;
 }
 
-.dual-range input[type="range"]::-webkit-slider-thumb {
+.dual-range input[type="range"]::-webkit-slider-thumb,
+.single-range input[type="range"]::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
   pointer-events: auto;
@@ -413,11 +449,13 @@
   cursor: pointer;
 }
 
-.dual-range input[type="range"]::-moz-range-track {
+.dual-range input[type="range"]::-moz-range-track,
+.single-range input[type="range"]::-moz-range-track {
   background: transparent;
 }
 
-.dual-range input[type="range"]::-moz-range-thumb {
+.dual-range input[type="range"]::-moz-range-thumb,
+.single-range input[type="range"]::-moz-range-thumb {
   pointer-events: auto;
   width: 14px;
   height: 14px;

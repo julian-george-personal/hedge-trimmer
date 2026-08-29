@@ -1,4 +1,4 @@
-#app {
+#explorer-root {
   --sidebar-width: 320px;
   position: relative;
   display: flex;
@@ -7,7 +7,7 @@
   min-height: 0;
 }
 
-#sidebar {
+#explorer-sidebar {
   width: var(--sidebar-width);
   flex-shrink: 0;
   display: flex;
@@ -17,7 +17,7 @@
   overflow: hidden;
 }
 
-#app.sidebar-collapsed #sidebar {
+#explorer-root.sidebar-collapsed #explorer-sidebar {
   width: 0;
   min-width: 0;
   border-right: none;
@@ -34,7 +34,7 @@
   z-index: 20;
 }
 
-#app.sidebar-collapsed #sidebar-resize-handle {
+#explorer-root.sidebar-collapsed #sidebar-resize-handle {
   display: none;
 }
 
@@ -70,20 +70,20 @@
   border-color: var(--accent);
 }
 
-#app.sidebar-collapsed #sidebar-toggle {
+#explorer-root.sidebar-collapsed #sidebar-toggle {
   left: 0;
   transform: translateY(-50%);
 }
 
-#app:not(.sidebar-resizing) #sidebar {
+#explorer-root:not(.sidebar-resizing) #explorer-sidebar {
   transition: width 0.15s ease;
 }
 
-#app:not(.sidebar-resizing) #sidebar-toggle {
+#explorer-root:not(.sidebar-resizing) #sidebar-toggle {
   transition: left 0.15s ease;
 }
 
-#search-bar {
+#explorer-search-bar {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -91,7 +91,7 @@
   border-bottom: 1px solid var(--border);
 }
 
-#search {
+#explorer-search {
   width: 100%;
   padding: 10px 14px;
   background: var(--bg);
@@ -101,12 +101,12 @@
   font-size: 14px;
 }
 
-#search:focus {
+#explorer-search:focus {
   outline: none;
   border-color: var(--accent);
 }
 
-#date-filter label {
+#explorer-date-filter label {
   display: block;
   color: var(--text-dim);
   font-size: 12px;
@@ -163,21 +163,108 @@
   color: var(--text);
 }
 
-#volume-filter label {
+.range-filter label {
   display: block;
   color: var(--text-dim);
   font-size: 12px;
   margin-bottom: 6px;
 }
 
-#volume-filter label span {
+.range-filter .range-values {
   color: var(--text);
   font-weight: 500;
 }
 
-#min-volume {
+.range-filter.loading .range-values {
+  color: var(--text-dim);
+  font-weight: 400;
+  font-style: italic;
+}
+
+.range-slider {
+  position: relative;
+  height: 20px;
+}
+
+.range-track {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 4px;
+  transform: translateY(-50%);
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.range-fill {
+  position: absolute;
+  top: 50%;
+  height: 4px;
+  transform: translateY(-50%);
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.range-slider input[type="range"] {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
-  accent-color: var(--accent);
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  pointer-events: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.range-slider input[type="range"]::-webkit-slider-runnable-track {
+  -webkit-appearance: none;
+  height: 4px;
+  background: transparent;
+}
+
+.range-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+}
+
+.range-slider input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: transparent;
+  border: none;
+}
+
+.range-slider input[type="range"]::-moz-range-thumb {
+  pointer-events: auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--panel);
+  cursor: pointer;
+}
+
+.range-filter.loading input[type="range"] {
+  cursor: not-allowed;
+}
+
+.range-filter.loading input[type="range"]::-webkit-slider-thumb {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.range-filter.loading input[type="range"]::-moz-range-thumb {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 #market-list {

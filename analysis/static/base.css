@@ -54,3 +54,14 @@ body {
   flex-direction: column;
   height: 100vh;
 }
+
+/* Explorer/analysis views stay mounted permanently and are just toggled by
+   app.js — display: contents lets the visible one's child participate
+   directly as page-body's flex item, same as before the merge. */
+.view {
+  display: contents;
+}
+
+.view[hidden] {
+  display: none;
+}

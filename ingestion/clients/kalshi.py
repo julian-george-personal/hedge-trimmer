@@ -5,6 +5,8 @@ from pathlib import Path
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 from ingestion.config import load_config
 
@@ -15,12 +17,26 @@ CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / "credentials" / "kals
 REQUEST_DELAY_SECONDS = load_config()["kalshi"]["request_delay_seconds"]
 
 
+def _session_with_retries() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 class KalshiClient:
     def __init__(self, key_id: str, private_key, base_url: str = BASE_URL):
         self.key_id = key_id
         self.private_key = private_key
         self.base_url = base_url
-        self.session = requests.Session()
+        self.session = _session_with_retries()
 
     @classmethod
     def from_credentials_dir(cls, credentials_dir: Path = CREDENTIALS_DIR) -> "KalshiClient":
