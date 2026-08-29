@@ -1,5 +1,5 @@
 import html
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -45,8 +45,7 @@ _PAGE = """<!doctype html>
   .switch input:checked + .slider {{ background-color: var(--no); }}
   .switch input:checked + .slider::before {{ transform: translateX(18px); }}
   .switch input:focus-visible + .slider {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
-  .banner.saved {{ padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; background: rgba(63, 191, 127, 0.12); border: 1px solid var(--yes); color: var(--yes); }}
-  .save-meta {{ margin-top: 0.6rem; font-size: 12px; color: var(--text-dim); }}
+  .banner.saved {{ padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 1rem; background: rgba(63, 191, 127, 0.12); border: 1px solid var(--yes); color: var(--yes); transition: opacity 0.4s ease; }}
   form.controls {{ display: inline; }}
   button {{ font: inherit; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.9rem; margin-right: 0.5rem; cursor: pointer; }}
   button:hover {{ border-color: var(--accent); }}
@@ -85,7 +84,7 @@ _PAGE = """<!doctype html>
 <body>
 <h1>autotrader</h1>
 
-{saved_banner}
+<div id="saved-banner">{saved_banner}</div>
 
 <div class="status {running_class}">
   <div class="status-left">
@@ -164,7 +163,6 @@ _PAGE = """<!doctype html>
     </div>
   </div>
   <div class="save"><button type="submit">Apply filters</button></div>
-  <div class="save-meta">{last_saved_text}</div>
 </form>
 
 <h2>Positions</h2>
@@ -204,6 +202,20 @@ function autotraderOnArmedToggle(checkbox) {{
   document.getElementById('armed-action-input').value = checkbox.checked ? 'arm' : 'disarm';
   document.getElementById('armed-form').submit();
 }}
+
+(function autotraderFadeSavedBanner() {{
+  var banner = document.querySelector('#saved-banner .banner.saved');
+  if (!banner) return;
+  setTimeout(function() {{
+    banner.style.opacity = '0';
+    setTimeout(function() {{ banner.remove(); }}, 400);
+  }}, 3000);
+  var url = new URL(window.location.href);
+  if (url.searchParams.has('saved')) {{
+    url.searchParams.delete('saved');
+    window.history.replaceState({{}}, '', url);
+  }}
+}})();
 </script>
 
 </body>
@@ -250,13 +262,32 @@ def _as_float(value) -> float | None:
     return float(value) if isinstance(value, Decimal) else value
 
 
+_ACTION_NOTES = {
+    "skipped_too_small": "bet size too small to buy 1 contract — no position taken",
+    "order_failed": "order placement failed — no position taken (see server logs)",
+}
+
+
+def _decision_outcome_note(item: dict) -> str | None:
+    """Explains why a "passed" decision has no corresponding row in the
+    Positions table, for the cases where that's not itself a bug."""
+    if item.get("trader_enabled") is False:
+        return "trader was stopped — no position taken"
+    action = item.get("action")
+    if action == "order_failed" and item.get("action_error"):
+        return f"order placement failed ({item['action_error']}) — no position taken (see server logs)"
+    return _ACTION_NOTES.get(action)
+
+
 def _decision_passed_detail(item: dict) -> str:
-    return (
+    detail = (
         f"side: {html.escape(item.get('side_team_name') or '')} &middot; "
         f"entry: ${_as_float(item.get('entry_price_dollars')):.2f} &middot; "
         f"win prob: {_as_float(item.get('win_prob_percent')):.1f}% &middot; "
         f"volume: {_as_float(item.get('volume')):.0f}"
     )
+    note = _decision_outcome_note(item)
+    return f"{detail} &middot; {html.escape(note)}" if note else detail
 
 
 def _to_second_precision(iso_timestamp: str) -> str:
@@ -343,29 +374,6 @@ def _trade_row(event: dict) -> str:
     )
 
 
-def _relative_time_ago(iso_timestamp: str, now: datetime) -> str:
-    seconds = (now - datetime.fromisoformat(iso_timestamp)).total_seconds()
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m ago"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)}h ago"
-    return f"{int(seconds // 86400)}d ago"
-
-
-def _last_applied_text(config: TradingConfig) -> str:
-    if not config.filters_updated_at:
-        return ""
-    ago = _relative_time_ago(config.filters_updated_at, datetime.now(timezone.utc))
-    scope = (
-        "New-entry filters are active now since the trader is Running."
-        if config.enabled
-        else "New-entry filters won't be used until you click Start; stop-loss/take-profit still apply to any open position."
-    )
-    return f"Filters last applied {ago}. {scope}"
-
-
 def render_dashboard(
     config: TradingConfig,
     positions: list[dict],
@@ -398,7 +406,6 @@ def render_dashboard(
             if saved
             else ""
         ),
-        last_saved_text=_last_applied_text(config),
         running_class="running" if config.enabled else "stopped",
         running_label="Running" if config.enabled else "Stopped",
         armed_class="armed" if config.armed else "dry",

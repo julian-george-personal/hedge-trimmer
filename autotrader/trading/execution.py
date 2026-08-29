@@ -30,11 +30,14 @@ def _place_entry_order(kalshi_client: KalshiClient, result: FilterResult, contra
 
 def enter_position(
     kalshi_client: KalshiClient, store: Store, event_ticker: str, result: FilterResult, config: TradingConfig
-) -> None:
+) -> str:
+    """Returns "entered" or "skipped_too_small" so the caller can record why
+    a "passed" decision didn't produce a position — an unhandled exception
+    (order placement failure) is the third case, left to propagate."""
     contracts = int(config.bet_per_match_dollars // result.entry_price_dollars)
     if contracts < 1:
-        logger.info("skip %s: bet size $%.2f too small at entry price $%.2f", event_ticker, config.bet_per_match_dollars, result.entry_price_dollars)
-        return
+        logger.warning("skip %s: bet size $%.2f too small at entry price $%.2f", event_ticker, config.bet_per_match_dollars, result.entry_price_dollars)
+        return "skipped_too_small"
 
     order_id = None
     if config.armed:
@@ -63,3 +66,4 @@ def enter_position(
             "order_id": order_id,
         },
     )
+    return "entered"

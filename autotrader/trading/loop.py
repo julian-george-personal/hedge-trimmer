@@ -30,26 +30,42 @@ class Runner:
         self.store = store
         self.series_ticker = series_ticker
 
-    def _record_decisions(self, results: list[MarketScanResult], scanned_at: str) -> list[MarketScanResult]:
+    def _act_on(self, result: MarketScanResult, config: TradingConfig) -> tuple[str, str | None]:
+        """Attempts to enter a "passed" decision and reports what happened,
+        rather than letting an order-placement failure propagate — a bare
+        exception here would abort _record_decisions partway through a tick,
+        silently skipping every other "passed" decision still left to record
+        and act on that tick."""
+        try:
+            return enter_position(self.kalshi_client, self.store, result.event_ticker, result.to_filter_result(), config), None
+        except Exception as exc:
+            logger.exception("error entering position for %s", result.event_ticker)
+            return "order_failed", str(exc)[:300]
+
+    def _record_decisions(self, results: list[MarketScanResult], scanned_at: str, config: TradingConfig) -> list[MarketScanResult]:
         decisions = [r for r in results if r.status in _DECISION_STATUSES]
         for result in decisions:
-            self.store.put_market_scan(result.event_ticker, scanned_at, result.to_item(scanned_at))
+            item = result.to_item(scanned_at)
+            # Recorded on every decision (not just "passed") so the log is
+            # self-explanatory later: a "passed" row logged while the trader
+            # was stopped is expected to have no corresponding position.
+            item["trader_enabled"] = config.enabled
+            if config.enabled and result.status == "passed":
+                action, error = self._act_on(result, config)
+                item["action"] = action
+                if error:
+                    item["action_error"] = error
+            self.store.put_market_scan(result.event_ticker, scanned_at, item)
         return decisions
 
     def _scan_and_act(self, config: TradingConfig) -> None:
         scanned_at = datetime.now(timezone.utc).isoformat()
         results = scan_markets(self.kalshi_client, self.pandascore_client, self.store, self.series_ticker, config)
-        decisions = self._record_decisions(results, scanned_at)
+        decisions = self._record_decisions(results, scanned_at, config)
         logger.info(
             "scanned %d open market(s), %d at decision point: %s",
             len(results), len(decisions), dict(Counter(r.status for r in decisions)),
         )
-
-        if not config.enabled:
-            return
-        for result in decisions:
-            if result.status == "passed":
-                enter_position(self.kalshi_client, self.store, result.event_ticker, result.to_filter_result(), config)
 
     def tick(self) -> None:
         config = load_config(self.store)
