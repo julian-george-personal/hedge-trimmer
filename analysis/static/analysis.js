@@ -407,6 +407,133 @@ function formatDollarsTooltipValue(point, local) {
   return `${prefix}${formatDollars(point.value)} total profit betting $${local.betAmount}/match (n=${point.n} match${point.n === 1 ? "" : "es"}${suffix})`;
 }
 
+// --- Optimal filter combination widget --------------------------------
+//
+// Grid-searches pre-match volume range x win-probability range x stop-loss
+// x take-profit threshold for whichever combination maximizes total dollar
+// profit (via simulateMatchProfit/computeDollarCurve's same realistic-fill
+// machinery), subject to a minimum sample size. A true joint optimum over
+// five real-valued knobs isn't tractable client-side against ~2k matches,
+// so this is a bounded grid: range endpoints are snapped to quantiles of
+// the actual data (so every bucket has matches in it, unlike an evenly
+// spaced grid) rather than searched continuously.
+const OPTIMIZER_VOLUME_BUCKETS = 6;
+const OPTIMIZER_WINPROB_BUCKETS = 6;
+const OPTIMIZER_STOPLOSS_STEP = 10;
+const OPTIMIZER_THRESHOLD_STEP = 5;
+const OPTIMIZER_YIELD_MS = 15;
+
+// Returns `buckets + 1` sorted, deduplicated cut points spanning `values`'
+// own distribution (0th, 1/buckets, ..., 100th percentile) — used as the
+// candidate min/max endpoints for both the volume and win-probability
+// grids, so no bucket is ever empty-by-construction the way a linear split
+// of a skewed distribution (e.g. volume) would be.
+function quantileBreakpoints(values, buckets) {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 0) return [0];
+  const points = [];
+  for (let i = 0; i <= buckets; i++) {
+    const idx = Math.min(sorted.length - 1, Math.round((i / buckets) * (sorted.length - 1)));
+    points.push(sorted[idx]);
+  }
+  return [...new Set(points)];
+}
+
+// All (min, max) pairs from a sorted breakpoint array with min < max. The
+// top breakpoint is itself the observed max of the underlying values (see
+// quantileBreakpoints), so pairing it in literally — rather than swapping
+// in Infinity — still includes every match at or above it under a `<=`
+// filter, while keeping the reported range an actual, meaningful number
+// (matters for win probability, which is already bounded to 0-100%).
+function rangePairsFromBreakpoints(breakpoints) {
+  const pairs = [];
+  for (let i = 0; i < breakpoints.length; i++) {
+    for (let j = i + 1; j < breakpoints.length; j++) {
+      pairs.push([breakpoints[i], breakpoints[j]]);
+    }
+  }
+  return pairs;
+}
+
+// Sweeps take-profit thresholds (at OPTIMIZER_THRESHOLD_STEP resolution,
+// coarser than the EV-curve widgets' 1% since this runs inside a much
+// larger outer grid) for one fixed stats subset + stop-loss, returning the
+// most profitable point that still meets minSampleSize. Stops as soon as a
+// threshold's eligible count drops below minSampleSize rather than
+// scanning to EV_CURVE_MAX_THRESHOLD — isThresholdReachable's eligible set
+// only shrinks as the threshold rises (see spikeResult), so every higher
+// threshold would fail the floor too.
+function bestDollarPoint(stats, side, stopLossPercent, betAmount, spread, feeSim, minSampleSize) {
+  let best = null;
+  for (let threshold = EV_CURVE_MIN_THRESHOLD; threshold <= EV_CURVE_MAX_THRESHOLD; threshold += OPTIMIZER_THRESHOLD_STEP) {
+    let total = 0;
+    let n = 0;
+    for (const stat of stats) {
+      const profit = simulateMatchProfit(stat, side, threshold, stopLossPercent, betAmount, spread, feeSim);
+      if (profit === null) continue;
+      total += profit;
+      n++;
+    }
+    if (n < minSampleSize) break;
+    if (!best || total > best.value) best = { threshold, value: total, n };
+  }
+  return best;
+}
+
+// Runs the full grid search, yielding to the event loop every
+// OPTIMIZER_YIELD_MS so the tab stays responsive, and reporting progress
+// via onProgress(0..1). runToken/isCurrent lets a re-run abandon a
+// still-running previous search instead of racing it for the result.
+async function runOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSim, onProgress, isCurrent) {
+  const volumeBreakpoints = quantileBreakpoints(pairs.map((p) => p.stat.volume_before_start), OPTIMIZER_VOLUME_BUCKETS);
+  const winProbBreakpoints = quantileBreakpoints(pairs.map((p) => p.stat[`${side}_start_price`] * 100), OPTIMIZER_WINPROB_BUCKETS);
+  const volumeRanges = rangePairsFromBreakpoints(volumeBreakpoints);
+  const winProbRanges = rangePairsFromBreakpoints(winProbBreakpoints);
+  const stopLossValues = [];
+  for (let s = 0; s <= 100; s += OPTIMIZER_STOPLOSS_STEP) stopLossValues.push(s);
+
+  let best = null;
+  let done = 0;
+  const totalCombos = volumeRanges.length * winProbRanges.length;
+  let chunkStart = performance.now();
+
+  for (const [minVolume, maxVolume] of volumeRanges) {
+    const byVolume = pairs.filter((p) => p.stat.volume_before_start >= minVolume && p.stat.volume_before_start <= maxVolume);
+    if (byVolume.length < minSampleSize) {
+      done += winProbRanges.length;
+      continue;
+    }
+
+    for (const [minWinProb, maxWinProb] of winProbRanges) {
+      const stats = byVolume
+        .filter((p) => {
+          const winProb = p.stat[`${side}_start_price`] * 100;
+          return winProb >= minWinProb && winProb <= maxWinProb;
+        })
+        .map((p) => p.stat);
+      done++;
+
+      if (stats.length >= minSampleSize) {
+        for (const stopLoss of stopLossValues) {
+          const point = bestDollarPoint(stats, side, stopLoss, betAmount, spread, feeSim, minSampleSize);
+          if (point && (!best || point.value > best.value)) {
+            best = { minVolume, maxVolume, minWinProb, maxWinProb, stopLoss, threshold: point.threshold, value: point.value, n: point.n };
+          }
+        }
+      }
+
+      if (performance.now() - chunkStart > OPTIMIZER_YIELD_MS) {
+        onProgress(done / totalCombos);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!isCurrent()) return null;
+        chunkStart = performance.now();
+      }
+    }
+  }
+  onProgress(1);
+  return best;
+}
+
 function linearScale(domain, range) {
   const [d0, d1] = domain;
   const [r0, r1] = range;
@@ -656,6 +783,20 @@ function buildBetAmountControl(onChange) {
   return { container, input };
 }
 
+// Integer input for the optimizer widget's sample-size floor — styled like
+// buildBetAmountControl, just constrained to whole matches.
+function buildMinSampleSizeControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "percent-control bet-amount-control";
+  container.innerHTML = `
+    <label for="min-sample-size-input">Minimum sample size (matches)</label>
+    <input id="min-sample-size-input" type="number" min="1" step="1" value="20" />
+  `;
+  const input = container.querySelector("input");
+  input.addEventListener("input", onChange);
+  return { container, input };
+}
+
 // Spread toggle for the dollar-profit widget — switches simulateMatchProfit
 // from the naive bid/ask-midpoint fill (buy and sell at the same mid price)
 // to buying at the ask and selling at the bid. Independent of fee
@@ -868,6 +1009,144 @@ const DOLLAR_PROFIT_CONFIG = {
   formatTooltipValue: formatDollarsTooltipValue,
 };
 
+// Unlike the EV-curve widgets above, this one doesn't recompute on every
+// filter tweak (renderAll/evCurveWidgetUpdaters) — a run costs a bounded
+// but still noticeable grid search (see runOptimizer), so it only runs
+// when the button is clicked, and other controls just mark the last result
+// stale rather than kicking off a new search themselves.
+function buildOptimizerWidget() {
+  const widget = document.createElement("div");
+  widget.className = "widget widget-wide";
+  widget.id = "widget-optimizer";
+  widget.innerHTML = `
+    <div class="widget-header">
+      <span class="widget-drag-handle" draggable="true" title="Drag to reorder">⠿</span>
+      <h2>Optimal filter combination (max profit, by pre-match volume)</h2>
+    </div>
+    <div class="side-toggle" role="group" aria-label="Side">
+      <button type="button" data-side="underdog" class="active">Underdog</button>
+      <button type="button" data-side="overdog">Overdog</button>
+    </div>
+    <div class="range-controls"></div>
+    <div class="optimizer-actions">
+      <button type="button" class="optimizer-run-button">Run optimization</button>
+      <div class="optimizer-progress" hidden>
+        <div class="optimizer-progress-track"><div class="optimizer-progress-fill"></div></div>
+        <span class="optimizer-progress-label"></span>
+      </div>
+    </div>
+    <div class="optimizer-result" hidden></div>
+    <p class="optimizer-note">Grid search over pre-match volume, win probability, stop-loss, and take-profit thresholds for the combination with the highest total profit — a coarse approximation snapped to quantiles of the actual data, not a guaranteed global optimum. Uses the same realistic spread/fee simulation as the dollar-profit widget above.</p>
+  `;
+
+  const local = { side: "underdog", runToken: 0 };
+  const rangeControls = widget.querySelector(".range-controls");
+  const runButton = widget.querySelector(".optimizer-run-button");
+  const resultEl = widget.querySelector(".optimizer-result");
+  const progressEl = widget.querySelector(".optimizer-progress");
+  const progressFill = widget.querySelector(".optimizer-progress-fill");
+  const progressLabel = widget.querySelector(".optimizer-progress-label");
+
+  const markStale = () => resultEl.classList.toggle("optimizer-result-stale", !resultEl.hidden);
+
+  const els = {
+    betAmount: buildBetAmountControl(markStale),
+    minSampleSize: buildMinSampleSizeControl(markStale),
+    spread: buildSpreadControl(markStale),
+    feeSim: buildFeeSimControl(markStale),
+  };
+  rangeControls.append(els.betAmount.container, els.minSampleSize.container, els.spread.container, els.feeSim.container);
+
+  widget.querySelectorAll(".side-toggle button").forEach((button) => {
+    button.addEventListener("click", () => {
+      local.side = button.dataset.side;
+      widget.querySelectorAll(".side-toggle button").forEach((b) => b.classList.toggle("active", b === button));
+      markStale();
+    });
+  });
+
+  runButton.addEventListener("click", async () => {
+    if (!state.statsLoaded) {
+      resultEl.hidden = false;
+      resultEl.classList.remove("optimizer-result-stale");
+      resultEl.innerHTML = `<div class="optimizer-result-empty">Loading match price data (first load can take a minute or two)…</div>`;
+      return;
+    }
+
+    const token = ++local.runToken;
+    const betAmount = Number(els.betAmount.input.value) || 0;
+    const minSampleSize = Math.max(1, Math.round(Number(els.minSampleSize.input.value) || 1));
+    const spread = els.spread.checkbox.checked;
+    const feeSim = els.feeSim.select.value;
+    const pairs = eventStatPairs(sidebarFilteredEvents());
+
+    runButton.disabled = true;
+    resultEl.hidden = true;
+    progressEl.hidden = false;
+    progressFill.style.width = "0%";
+    progressLabel.textContent = "0%";
+
+    const best = await runOptimizer(
+      pairs,
+      local.side,
+      betAmount,
+      minSampleSize,
+      spread,
+      feeSim,
+      (fraction) => {
+        progressFill.style.width = `${Math.round(fraction * 100)}%`;
+        progressLabel.textContent = `${Math.round(fraction * 100)}%`;
+      },
+      () => token === local.runToken
+    );
+
+    if (token !== local.runToken) return; // superseded by a newer run
+
+    progressEl.hidden = true;
+    runButton.disabled = false;
+    renderOptimizerResult(resultEl, best, local.side, betAmount, minSampleSize, spread, feeSim, pairs.length);
+  });
+
+  return widget;
+}
+
+// Renders runOptimizer's winning combination (or an explanatory empty
+// state) into the optimizer widget's result panel.
+function renderOptimizerResult(resultEl, best, side, betAmount, minSampleSize, spread, feeSim, totalMatches) {
+  resultEl.hidden = false;
+  resultEl.classList.remove("optimizer-result-stale");
+
+  if (!best) {
+    resultEl.innerHTML = `<div class="optimizer-result-empty">No combination of filters reached a sample size of ${minSampleSize} match${minSampleSize === 1 ? "" : "es"} (of ${totalMatches} matches in the current sidebar filters).</div>`;
+    return;
+  }
+
+  const notes = [];
+  if (spread) notes.push("realistic spread");
+  if (feeSim !== "none") notes.push(`${FEE_SIM_LABELS[feeSim]} fees`);
+  const suffix = notes.length ? ` (${notes.join(", ")})` : "";
+
+  const item = (label, value) => `
+    <div class="optimizer-result-item">
+      <div class="result-label">${label}</div>
+      <div class="result-value">${value}</div>
+    </div>`;
+
+  resultEl.innerHTML = `
+    <div class="optimizer-result-headline">
+      <div class="result-label">Best total profit betting $${betAmount}/match, ${side}${suffix}</div>
+      <div class="result-value ${best.value >= 0 ? "positive" : "negative"}">${best.value >= 0 ? "+" : ""}${formatDollars(best.value)}</div>
+      <div class="result-detail">n=${best.n} of ${totalMatches} matches in the current sidebar filters</div>
+    </div>
+    <div class="optimizer-result-grid">
+      ${item("Pre-match volume", `${formatVolume(best.minVolume)} – ${formatVolume(best.maxVolume)}`)}
+      ${item("Win probability at start", `${best.minWinProb.toFixed(0)}% – ${best.maxWinProb.toFixed(0)}%`)}
+      ${item("Stop-loss", best.stopLoss === 0 ? "Off" : `≤ ${best.stopLoss}% of start price`)}
+      ${item("Take-profit (max price)", `+${best.threshold - EV_CURVE_MIN_THRESHOLD}%`)}
+    </div>
+  `;
+}
+
 function buildPriceSpikeWidget() {
   const widget = document.createElement("div");
   widget.className = "widget";
@@ -1024,6 +1303,7 @@ async function init() {
   widgets.appendChild(buildEvCurveWidget(TOTAL_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(PRE_MATCH_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(DOLLAR_PROFIT_CONFIG));
+  widgets.appendChild(buildOptimizerWidget());
   applyWidgetOrder(widgets, loadWidgetOrder());
   setupWidgetDragAndDrop(widgets);
   setupFilters();
