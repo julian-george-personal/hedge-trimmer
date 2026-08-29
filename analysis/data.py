@@ -131,11 +131,22 @@ _candle_price_series_cache: dict[str, list[dict]] | None = None
 
 def candle_price_series() -> dict[str, list[dict]]:
     """Mid price (yes_bid/yes_ask midpoint) and volume time series for every
-    ticker with candle data, keyed by ticker and sorted by time. Reads every
-    candles parquet file in one glob query (~70s cold) since that's
-    dramatically faster than one S3 read per ticker; cached in memory for the
-    process lifetime, same operational model as the pandascore match-start
-    index."""
+    ticker with candle data, keyed by ticker and sorted by time, plus each
+    candle's intra-period mid low/high (yes_bid/yes_ask low-low and
+    high-high midpoints) alongside the close-derived "price" — a stop-loss
+    or take-profit level can be touched and recover within a single 1-minute
+    candle, invisible if only the close is checked; see
+    price_spike._running_extrema_breakpoints, the one consumer of low/high.
+
+    Also carries the raw yes_bid/yes_ask close/low/high alongside the mid,
+    unaveraged — a realistic fill buys at the ask and sells at the bid, not
+    at the mid the naive simulation uses; see price_spike._event_price_spike
+    for the ask-entry / bid-exit fields built from these.
+
+    Reads every candles parquet file in one glob query (~70s cold) since
+    that's dramatically faster than one S3 read per ticker; cached in memory
+    for the process lifetime, same operational model as the pandascore
+    match-start index."""
     global _candle_price_series_cache
     if _candle_price_series_cache is None:
         rows = _records(
@@ -144,6 +155,14 @@ def candle_price_series() -> dict[str, list[dict]]:
                 ticker,
                 end_period_ts AS t,
                 (TRY_CAST("yes_bid.close_dollars" AS DOUBLE) + TRY_CAST("yes_ask.close_dollars" AS DOUBLE)) / 2 AS price,
+                (TRY_CAST("yes_bid.low_dollars" AS DOUBLE) + TRY_CAST("yes_ask.low_dollars" AS DOUBLE)) / 2 AS low,
+                (TRY_CAST("yes_bid.high_dollars" AS DOUBLE) + TRY_CAST("yes_ask.high_dollars" AS DOUBLE)) / 2 AS high,
+                TRY_CAST("yes_ask.close_dollars" AS DOUBLE) AS ask_price,
+                TRY_CAST("yes_ask.low_dollars" AS DOUBLE) AS ask_low,
+                TRY_CAST("yes_ask.high_dollars" AS DOUBLE) AS ask_high,
+                TRY_CAST("yes_bid.close_dollars" AS DOUBLE) AS bid_price,
+                TRY_CAST("yes_bid.low_dollars" AS DOUBLE) AS bid_low,
+                TRY_CAST("yes_bid.high_dollars" AS DOUBLE) AS bid_high,
                 TRY_CAST(volume_fp AS DOUBLE) AS volume
             FROM read_parquet('{DATA_ROOT}/candles/*/candles.parquet', hive_partitioning = true)
             ORDER BY ticker, t
@@ -151,6 +170,20 @@ def candle_price_series() -> dict[str, list[dict]]:
         )
         series: dict[str, list[dict]] = {}
         for row in rows:
-            series.setdefault(row["ticker"], []).append({"t": row["t"], "price": row["price"], "volume": row["volume"] or 0})
+            series.setdefault(row["ticker"], []).append(
+                {
+                    "t": row["t"],
+                    "price": row["price"],
+                    "low": row["low"],
+                    "high": row["high"],
+                    "ask_price": row["ask_price"],
+                    "ask_low": row["ask_low"],
+                    "ask_high": row["ask_high"],
+                    "bid_price": row["bid_price"],
+                    "bid_low": row["bid_low"],
+                    "bid_high": row["bid_high"],
+                    "volume": row["volume"] or 0,
+                }
+            )
         _candle_price_series_cache = series
     return _candle_price_series_cache

@@ -227,6 +227,47 @@
   font-weight: 500;
 }
 
+.bet-amount-control input[type="number"] {
+  width: 120px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.bet-amount-control input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.realistic-fill-control label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin-bottom: 0;
+}
+
+.realistic-fill-control input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.fee-sim-control select {
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.fee-sim-control select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .widget-result {
   padding-top: 14px;
   border-top: 1px solid var(--border);

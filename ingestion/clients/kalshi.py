@@ -15,6 +15,7 @@ API_PREFIX = "/trade-api/v2"
 
 CREDENTIALS_DIR = Path(__file__).resolve().parent.parent / "credentials" / "kalshi"
 REQUEST_DELAY_SECONDS = load_config()["kalshi"]["request_delay_seconds"]
+REQUEST_TIMEOUT_SECONDS = 30
 
 
 def _session_with_retries() -> requests.Session:
@@ -67,6 +68,8 @@ class KalshiClient:
         full_path = API_PREFIX + path
         headers = self._auth_headers("GET", full_path)
         time.sleep(REQUEST_DELAY_SECONDS)
-        resp = self.session.get(self.base_url + path, headers=headers, params=params)
+        resp = self.session.get(
+            self.base_url + path, headers=headers, params=params, timeout=REQUEST_TIMEOUT_SECONDS
+        )
         resp.raise_for_status()
         return resp.json()

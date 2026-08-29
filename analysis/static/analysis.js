@@ -289,9 +289,122 @@ function computeEvCurve(stats, side, stopLossPercent = 0) {
     const { count, total, stopped } = spikeResult(stats, side, threshold, stopLossPercent);
     if (total === 0) break;
     const ev = expectedValuePerBet(count / total, threshold, stopped / total, stopLossPercent);
-    points.push({ increase: threshold - EV_CURVE_MIN_THRESHOLD, ev });
+    points.push({ increase: threshold - EV_CURVE_MIN_THRESHOLD, value: ev });
   }
   return points;
+}
+
+// Binary-searches a record-high/record-low breakpoint array (see
+// _running_extrema_breakpoints in price_spike.py — [price, secondsOffset]
+// pairs, sorted by time, monotonic in price) for the earliest breakpoint
+// whose price satisfies `reaches`. Once a breakpoint satisfies it, every
+// later one does too (prices only move further from the start in one
+// direction), so this is a standard "first true" binary search rather than
+// a linear scan of the raw per-minute series.
+function firstTouch(breakpoints, reaches) {
+  let lo = 0;
+  let hi = breakpoints.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (reaches(breakpoints[mid][0])) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo < breakpoints.length ? { price: breakpoints[lo][0], t: breakpoints[lo][1] } : null;
+}
+
+// Per-leg trading fee, shaped after Kalshi's documented general formula:
+// ceil(rate * contracts * price * (1-price)), rounded up to the cent — peaks
+// at price=0.5, tapering toward the extremes. Kalshi's published taker fee
+// peaks at 1.75% (rate 0.07); Polymarket's sports-market taker fee peaks at
+// roughly 0.75% (rate 0.03) per public reporting as of 2026-08. Neither is
+// confirmed against the CS2 series or this backfill's specific period —
+// treat the fee-simulation numbers as an estimate, not a verified replay of
+// what either venue actually charged.
+const FEE_SIM_RATES = { kalshi: 0.07, polymarket: 0.03 };
+const FEE_SIM_LABELS = { kalshi: "Kalshi", polymarket: "Polymarket" };
+
+function simulatedFee(feeSim, contracts, price) {
+  const rate = FEE_SIM_RATES[feeSim];
+  if (!rate) return 0;
+  return Math.ceil(rate * contracts * price * (1 - price) * 100) / 100;
+}
+
+// Replays one match's actual price path (via its tp/sl breakpoints) to find
+// whichever of the take-profit threshold or stop-loss level was crossed
+// *first in time* — unlike spikeResult, which only has each match's overall
+// max/min and so can't tell a late spike above threshold apart from an early
+// stop-loss that would have closed the position first. Falls back to the
+// last observed price (a reasonable settlement proxy — see the dollar-profit
+// widget's plan notes) if neither level was ever touched in the data.
+// Returns dollar profit for `betAmount` worth of whole contracts bought at
+// the start price, or null if the threshold is unreachable (mirrors
+// isThresholdReachable) or, in realistic mode, if the match has no ask-side
+// data to enter with.
+//
+// spread, when true, switches from the naive bid/ask-midpoint fill (buy and
+// sell at the same mid price) to buying at the ask, selling at the bid on
+// both the take-profit and stop-loss exits — see the `${side}_entry_ask` /
+// `${side}_bid_*` fields built in price_spike.py. feeSim, independent of
+// spread, picks which venue's per-leg fee formula (see simulatedFee) to
+// subtract — "none" applies no fees.
+function simulateMatchProfit(stat, side, thresholdPercent, stopLossPercent, betAmount, spread = false, feeSim = "none") {
+  const startPrice = spread ? stat[`${side}_entry_ask`] : stat[`${side}_start_price`];
+  if (startPrice == null) return null;
+  const thresholdFactor = thresholdPercent / 100;
+  if (!isThresholdReachable(startPrice, thresholdFactor)) return null;
+  const thresholdPrice = thresholdFactor * startPrice;
+
+  const tpBreakpoints = stat[spread ? `${side}_bid_tp_breakpoints` : `${side}_tp_breakpoints`];
+  const slBreakpoints = stat[spread ? `${side}_bid_sl_breakpoints` : `${side}_sl_breakpoints`];
+  const tpTouch = firstTouch(tpBreakpoints, (price) => price >= thresholdPrice);
+  const stopLossPrice = stopLossPercent > 0 ? (stopLossPercent / 100) * startPrice : null;
+  const slTouch = stopLossPrice !== null ? firstTouch(slBreakpoints, (price) => price <= stopLossPrice) : null;
+
+  let exitPrice;
+  if (tpTouch && (!slTouch || tpTouch.t <= slTouch.t)) exitPrice = thresholdPrice;
+  else if (slTouch) exitPrice = stopLossPrice;
+  else exitPrice = stat[spread ? `${side}_last_bid` : `${side}_last_price`];
+  if (exitPrice == null) return null;
+
+  const contracts = Math.floor(betAmount / startPrice);
+  let profit = contracts * (exitPrice - startPrice);
+  if (feeSim !== "none") profit -= simulatedFee(feeSim, contracts, startPrice) + simulatedFee(feeSim, contracts, exitPrice);
+  return profit;
+}
+
+// Sums simulateMatchProfit's realized dollar outcome across every eligible
+// match at each threshold — total money made if betAmount had been bet on
+// every filtered match, not an average, so the curve reflects both changing
+// win rate and the shrinking eligible set as the threshold rises.
+function computeDollarCurve(stats, side, stopLossPercent, betAmount, spread = false, feeSim = "none") {
+  const points = [];
+  for (let threshold = EV_CURVE_MIN_THRESHOLD; threshold <= EV_CURVE_MAX_THRESHOLD; threshold += EV_CURVE_STEP) {
+    let total = 0;
+    let n = 0;
+    for (const stat of stats) {
+      const profit = simulateMatchProfit(stat, side, threshold, stopLossPercent, betAmount, spread, feeSim);
+      if (profit === null) continue;
+      total += profit;
+      n++;
+    }
+    if (n === 0) break;
+    points.push({ increase: threshold - EV_CURVE_MIN_THRESHOLD, value: total, n });
+  }
+  return points;
+}
+
+function formatDollars(amount) {
+  const sign = amount < 0 ? "-" : "";
+  return `${sign}$${Math.abs(Math.round(amount)).toLocaleString()}`;
+}
+
+function formatDollarsTooltipValue(point, local) {
+  const prefix = point.value >= 0 ? "+" : "";
+  const notes = [];
+  if (local.spread) notes.push("realistic spread");
+  if (local.feeSim && local.feeSim !== "none") notes.push(`${FEE_SIM_LABELS[local.feeSim]} fees`);
+  const suffix = notes.length ? `, ${notes.join(", ")}` : "";
+  return `${prefix}${formatDollars(point.value)} total profit betting $${local.betAmount}/match (n=${point.n} match${point.n === 1 ? "" : "es"}${suffix})`;
 }
 
 function linearScale(domain, range) {
@@ -337,15 +450,24 @@ function chartPlotArea() {
   };
 }
 
+// Default percent formatting for the two EV-curve widgets' y axis — the
+// dollar-profit widget passes its own formatYTick instead (see
+// DOLLAR_PROFIT_CONFIG.formatYTick).
+function formatEvPercentTick(tick) {
+  return `${tick > 0 ? "+" : ""}${Math.round(tick * 100)}%`;
+}
+
 // Clears and redraws the svg (gridlines, axis labels, data line); returns
-// the scales so the hover layer can map pointer position back to a data point.
-function renderEvChart(svg, points, color) {
+// the scales so the hover layer can map pointer position back to a data
+// point. points are { increase, value } — value's unit (percent-of-stake or
+// dollars) is opaque here; formatYTick renders it for the y axis.
+function renderEvChart(svg, points, color, formatYTick = formatEvPercentTick) {
   svg.innerHTML = "";
   const plot = chartPlotArea();
   const xDomain = [0, EV_CURVE_MAX_THRESHOLD - EV_CURVE_MIN_THRESHOLD];
-  const evs = points.map((p) => p.ev);
-  const yDataMin = Math.min(...evs, 0);
-  const yDataMax = Math.max(...evs, 0);
+  const values = points.map((p) => p.value);
+  const yDataMin = Math.min(...values, 0);
+  const yDataMax = Math.max(...values, 0);
   const yPad = (yDataMax - yDataMin) * 0.08 || 0.05;
   const yDomain = [yDataMin - yPad, yDataMax + yPad];
 
@@ -359,7 +481,7 @@ function renderEvChart(svg, points, color) {
       svgEl("line", { x1: plot.left, x2: plot.right, y1: y, y2: y, class: tick === 0 ? "chart-zero-line" : "chart-gridline" })
     );
     const label = svgEl("text", { x: plot.left - 8, y, class: "chart-axis-label", "text-anchor": "end", "dominant-baseline": "middle" });
-    label.textContent = `${tick > 0 ? "+" : ""}${Math.round(tick * 100)}%`;
+    label.textContent = formatYTick(tick);
     grid.appendChild(label);
   });
   for (let tick = xDomain[0]; tick <= xDomain[1]; tick += 100) {
@@ -369,17 +491,21 @@ function renderEvChart(svg, points, color) {
   }
   svg.appendChild(grid);
 
-  const linePoints = points.map((p) => `${xScale(p.increase)},${yScale(p.ev)}`).join(" ");
+  const linePoints = points.map((p) => `${xScale(p.increase)},${yScale(p.value)}`).join(" ");
   svg.appendChild(svgEl("polyline", { points: linePoints, class: "chart-line", style: `stroke:${color}` }));
 
   return { xScale, yScale, plot };
+}
+
+function formatEvPercentTooltip(point) {
+  return `${point.value >= 0 ? "+" : ""}${(point.value * 100).toFixed(1)}% expected profit`;
 }
 
 // Transparent overlay over the plot area that tracks the pointer, snaps to
 // the nearest sampled point (points are one per integer % so the index IS
 // the increase value), and drives a crosshair + tooltip — see
 // references/interaction.md's "crosshair finds the X" pattern.
-function attachEvChartHover(widget, svg, points, scales, color, tooltip) {
+function attachEvChartHover(widget, svg, points, scales, color, tooltip, formatTooltipValue = formatEvPercentTooltip) {
   const { xScale, yScale, plot } = scales;
   const crosshair = svgEl("line", { x1: 0, x2: 0, y1: plot.top, y2: plot.bottom, class: "chart-crosshair" });
   const dot = svgEl("circle", { r: 4, class: "chart-hover-dot", fill: color });
@@ -408,7 +534,7 @@ function attachEvChartHover(widget, svg, points, scales, color, tooltip) {
     if (!point) return;
 
     const x = xScale(point.increase);
-    const y = yScale(point.ev);
+    const y = yScale(point.value);
     crosshair.setAttribute("x1", x);
     crosshair.setAttribute("x2", x);
     crosshair.classList.add("visible");
@@ -422,7 +548,7 @@ function attachEvChartHover(widget, svg, points, scales, color, tooltip) {
     line1.textContent = `+${point.increase}% max price`;
     const line2 = document.createElement("div");
     line2.className = "chart-tooltip-value";
-    line2.textContent = `${point.ev >= 0 ? "+" : ""}${(point.ev * 100).toFixed(1)}% expected profit`;
+    line2.textContent = formatTooltipValue(point);
     tooltip.append(line1, line2);
 
     const wrapRect = widget.querySelector(".chart-wrap").getBoundingClientRect();
@@ -515,6 +641,56 @@ function buildStopLossControl(onChange) {
   return { container, slider, label: container.querySelector(".range-label") };
 }
 
+// Plain dollar-amount input for the dollar-profit EV-curve widget's
+// per-match bet size — styled like buildStopLossControl's percent-control
+// wrapper, just with a typed number instead of a slider.
+function buildBetAmountControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "percent-control bet-amount-control";
+  container.innerHTML = `
+    <label for="bet-amount-input">Bet per match ($)</label>
+    <input id="bet-amount-input" type="number" min="1" step="1" value="100" />
+  `;
+  const input = container.querySelector("input");
+  input.addEventListener("input", onChange);
+  return { container, input };
+}
+
+// Spread toggle for the dollar-profit widget — switches simulateMatchProfit
+// from the naive bid/ask-midpoint fill (buy and sell at the same mid price)
+// to buying at the ask and selling at the bid. Independent of fee
+// simulation (see buildFeeSimControl) — spread and fees model two separate
+// costs, so either can be toggled on its own.
+function buildSpreadControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "percent-control realistic-fill-control";
+  container.innerHTML = `
+    <label><input type="checkbox" id="spread-checkbox" /> Model realistic spread (buy ask / sell bid)</label>
+  `;
+  const checkbox = container.querySelector("input");
+  checkbox.addEventListener("change", onChange);
+  return { container, checkbox };
+}
+
+// Fee-simulation dropdown for the dollar-profit widget — picks which
+// venue's per-leg fee formula (see simulatedFee) simulateMatchProfit
+// subtracts, independent of the spread toggle above.
+function buildFeeSimControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "percent-control fee-sim-control";
+  container.innerHTML = `
+    <label for="fee-sim-select">Fee simulation</label>
+    <select id="fee-sim-select">
+      <option value="none">None</option>
+      <option value="kalshi">Kalshi</option>
+      <option value="polymarket">Polymarket</option>
+    </select>
+  `;
+  const select = container.querySelector("select");
+  select.addEventListener("change", onChange);
+  return { container, select };
+}
+
 // config: { id, title, volumeLabel, volumeOf(pair), maxVolume(), winProbFilter? }
 // — volumeOf reads the filter value off an { event, stat } pair (see
 // eventStatPairs), so the same widget shape can filter by an event-level
@@ -523,7 +699,12 @@ function buildStopLossControl(onChange) {
 // selected side's implied win probability (share price) at match start.
 // stopLoss, when true, adds a slider that makes matches which never hit the
 // take-profit threshold but did fall to or below it a smaller ("stopped
-// out") loss instead of a total one — see expectedValuePerBet.
+// out") loss instead of a total one — see expectedValuePerBet. betAmount,
+// when true, adds a typed dollar-per-match input (see buildBetAmountControl)
+// for configs that price outcomes in dollars rather than percent-of-stake.
+// computePoints/formatYTick/formatTooltipValue let a config swap in its own
+// point computation and value formatting (see computeDollarCurve and
+// DOLLAR_PROFIT_CONFIG) instead of the default percent-of-stake EV curve.
 function buildEvCurveWidget(config) {
   const widget = document.createElement("div");
   widget.className = "widget widget-wide";
@@ -545,7 +726,7 @@ function buildEvCurveWidget(config) {
     <div class="range-controls"></div>
   `;
 
-  const local = { side: "underdog" };
+  const local = { side: "underdog", betAmount: 100, spread: false, feeSim: "none" };
   const update = () => updateEvCurveWidget(widget, els, local, config);
 
   const rangeControls = widget.querySelector(".range-controls");
@@ -557,10 +738,16 @@ function buildEvCurveWidget(config) {
       ? buildDualRangeControl("winprob-range", "Side's win probability at match start", update)
       : null,
     stopLoss: config.stopLoss ? buildStopLossControl(update) : null,
+    betAmount: config.betAmount ? buildBetAmountControl(update) : null,
+    spread: config.realisticFill ? buildSpreadControl(update) : null,
+    feeSim: config.realisticFill ? buildFeeSimControl(update) : null,
   };
   rangeControls.appendChild(els.volume.container);
   if (els.winProb) rangeControls.appendChild(els.winProb.container);
   if (els.stopLoss) rangeControls.appendChild(els.stopLoss.container);
+  if (els.betAmount) rangeControls.appendChild(els.betAmount.container);
+  if (els.spread) rangeControls.appendChild(els.spread.container);
+  if (els.feeSim) rangeControls.appendChild(els.feeSim.container);
 
   widget.querySelectorAll(".side-toggle button").forEach((button) => {
     button.addEventListener("click", () => {
@@ -599,6 +786,13 @@ function updateEvCurveWidget(widget, els, local, config) {
     els.stopLoss.label.textContent = stopLossPercent === 0 ? "Off" : `${stopLossPercent}%`;
   }
 
+  if (els.betAmount) {
+    local.betAmount = Number(els.betAmount.input.value) || 0;
+  }
+
+  local.spread = els.spread ? els.spread.checkbox.checked : false;
+  local.feeSim = els.feeSim ? els.feeSim.select.value : "none";
+
   if (!state.statsLoaded) {
     els.volume.rangeSampleSize.textContent = "";
     if (els.winProb) els.winProb.rangeSampleSize.textContent = "";
@@ -618,7 +812,9 @@ function updateEvCurveWidget(widget, els, local, config) {
   els.volume.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
   if (els.winProb) els.winProb.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
 
-  const points = computeEvCurve(pairs.map((pair) => pair.stat), local.side, stopLossPercent);
+  const points = config.computePoints
+    ? config.computePoints(pairs.map((pair) => pair.stat), local.side, stopLossPercent, local.betAmount, local.spread, local.feeSim)
+    : computeEvCurve(pairs.map((pair) => pair.stat), local.side, stopLossPercent);
   if (points.length === 0) {
     showChartMessage(widget, "No matches with usable price data in the current filters.");
     return;
@@ -626,8 +822,10 @@ function updateEvCurveWidget(widget, els, local, config) {
 
   hideChartMessage(widget);
   const color = SIDE_COLORS[local.side];
-  const scales = renderEvChart(els.svg, points, color);
-  attachEvChartHover(widget, els.svg, points, scales, color, els.tooltip);
+  const formatYTick = config.formatYTick ? (tick) => config.formatYTick(tick, local) : undefined;
+  const formatTooltipValue = config.formatTooltipValue ? (point) => config.formatTooltipValue(point, local) : undefined;
+  const scales = renderEvChart(els.svg, points, color, formatYTick);
+  attachEvChartHover(widget, els.svg, points, scales, color, els.tooltip, formatTooltipValue);
 }
 
 const evCurveWidgetUpdaters = [];
@@ -648,6 +846,26 @@ const PRE_MATCH_VOLUME_CONFIG = {
   maxVolume: () => state.maxVolumeBeforeStart,
   winProbFilter: true,
   stopLoss: true,
+};
+
+// Same pre-match-volume filter set as PRE_MATCH_VOLUME_CONFIG, but priced in
+// dollars via a real time-ordered path simulation (simulateMatchProfit)
+// instead of the plain max/min-based percent EV curve — see
+// simulateMatchProfit and computeDollarCurve for why those aren't
+// interchangeable (first-touch ordering of take-profit vs. stop-loss).
+const DOLLAR_PROFIT_CONFIG = {
+  id: "widget-ev-curve-dollar",
+  title: "Max price increase vs. money made (by pre-match volume)",
+  volumeLabel: "Pre-match volume",
+  volumeOf: (pair) => pair.stat.volume_before_start,
+  maxVolume: () => state.maxVolumeBeforeStart,
+  winProbFilter: true,
+  stopLoss: true,
+  betAmount: true,
+  realisticFill: true,
+  computePoints: computeDollarCurve,
+  formatYTick: (tick) => formatDollars(tick),
+  formatTooltipValue: formatDollarsTooltipValue,
 };
 
 function buildPriceSpikeWidget() {
@@ -805,6 +1023,7 @@ async function init() {
   widgets.appendChild(buildPriceSpikeWidget());
   widgets.appendChild(buildEvCurveWidget(TOTAL_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(PRE_MATCH_VOLUME_CONFIG));
+  widgets.appendChild(buildEvCurveWidget(DOLLAR_PROFIT_CONFIG));
   applyWidgetOrder(widgets, loadWidgetOrder());
   setupWidgetDragAndDrop(widgets);
   setupFilters();
