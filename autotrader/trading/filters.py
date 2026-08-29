@@ -41,8 +41,15 @@ def evaluate_candidate(kalshi_client: KalshiClient, candidate: dict, config: Tra
     since the real match hasn't started yet at decision time."""
     markets = [kalshi_client.get_market(m["ticker"]) for m in candidate["markets"]]
     prices = [quote_price_dollars(m) for m in markets]
-    if None in prices or prices[0] == prices[1]:
-        return FilterResult(passes=False, reason="missing or tied quote")
+
+    missing_teams = [candidate["markets"][i]["team_name"] for i, price in enumerate(prices) if price is None]
+    if missing_teams:
+        return FilterResult(passes=False, reason=f"missing quote for {' and '.join(missing_teams)}")
+    if prices[0] == prices[1]:
+        return FilterResult(
+            passes=False,
+            reason=f"tied quote: both sides priced at ${prices[0]:.2f}",
+        )
 
     side_index = _assign_side(candidate, prices, config.side)
     entry_price = prices[side_index]
