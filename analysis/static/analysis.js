@@ -575,24 +575,27 @@ async function runOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSi
 // silently turns high thresholds into "hold to expiry" for every
 // high-probability side. This variant partitions matches into
 // win-probability bands and finds each band's own optimal exit instead.
+// Default/fallback band width — overridden per run by the widget's band-
+// width control (see buildBandWidthControl), this only applies if
+// runBandOptimizer is ever called without one.
 const BAND_OPTIMIZER_BAND_WIDTH = 2.5;
 
 // Contiguous fixed-width win-probability bands partitioning `pairs` for
-// the band optimizer — BAND_OPTIMIZER_BAND_WIDTH points each, aligned to
-// multiples of the width and spanning the observed range. Fixed widths
-// keep bands comparable across sides, filters, and cached runs (quantile
-// edges would move with the data); sparse edge bands just fall under the
-// per-band sample floor and render as skipped. Bands are [lo, hi), except
-// the last, which includes its upper edge so the max-probability match
-// still lands in a band.
-function winProbBands(pairs, side) {
+// the band optimizer — bandWidth points each, aligned to multiples of the
+// width and spanning the observed range. Fixed widths keep bands
+// comparable across sides, filters, and cached runs (quantile edges would
+// move with the data); sparse edge bands just fall under the per-band
+// sample floor and render as skipped. Bands are [lo, hi), except the last,
+// which includes its upper edge so the max-probability match still lands
+// in a band.
+function winProbBands(pairs, side, bandWidth) {
   const winProbs = pairs.map((p) => p.stat[`${side}_start_price`] * 100);
   if (winProbs.length === 0) return [];
-  const first = Math.floor(Math.min(...winProbs) / BAND_OPTIMIZER_BAND_WIDTH) * BAND_OPTIMIZER_BAND_WIDTH;
+  const first = Math.floor(Math.min(...winProbs) / bandWidth) * bandWidth;
   const max = Math.max(...winProbs);
   const bands = [];
-  for (let lo = first; lo < max; lo += BAND_OPTIMIZER_BAND_WIDTH) {
-    bands.push({ lo, hi: lo + BAND_OPTIMIZER_BAND_WIDTH, last: lo + BAND_OPTIMIZER_BAND_WIDTH >= max });
+  for (let lo = first; lo < max; lo += bandWidth) {
+    bands.push({ lo, hi: lo + bandWidth, last: lo + bandWidth >= max });
   }
   return bands;
 }
@@ -615,16 +618,19 @@ function bestBandExit(stats, side, betAmount, minSampleSize, spread, feeSim) {
 }
 
 // Like runOptimizer, but instead of one global win-probability range and
-// take-profit threshold, it fixes 2.5%-wide win-probability bands and finds
-// each band's own optimal (stop-loss, take-profit) — the resulting policy
-// reads "if the side's start probability falls in band B, use B's exits;
-// if B's best exit still loses money, don't bet that band at all". The
-// pre-match volume range stays a single shared knob searched as before. A
-// volume range's total is the sum over its profitable bands, and the
-// winning result keeps every band (no-bet and under-sampled ones included)
-// so the display can show the complete policy.
-async function runBandOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSim, onProgress, isCurrent) {
-  const bands = winProbBands(pairs, side);
+// take-profit threshold, it fixes bandWidth-wide win-probability bands and
+// finds each band's own optimal (stop-loss, take-profit) — the resulting
+// policy reads "if the side's start probability falls in band B, use B's
+// exits; if B's best exit still loses money, don't bet that band at all".
+// minSampleSize is a per-band floor, not a floor on the total match count —
+// each band independently needs at least that many matches to be searched
+// at all (see the widget's "per band" label). The pre-match volume range
+// stays a single shared knob searched as before. A volume range's total is
+// the sum over its profitable bands, and the winning result keeps every
+// band (no-bet and under-sampled ones included) so the display can show
+// the complete policy.
+async function runBandOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSim, onProgress, isCurrent, bandWidth = BAND_OPTIMIZER_BAND_WIDTH) {
+  const bands = winProbBands(pairs, side, bandWidth);
   if (bands.length === 0) return null;
   const volumeBreakpoints = quantileBreakpoints(pairs.map((p) => p.stat.volume_before_start), OPTIMIZER_VOLUME_BUCKETS);
   const volumeRanges = rangePairsFromBreakpoints(volumeBreakpoints);
@@ -1154,13 +1160,29 @@ function buildBetAmountControl(onChange) {
 }
 
 // Integer input for the optimizer widget's sample-size floor — styled like
-// buildBetAmountControl, just constrained to whole matches.
-function buildMinSampleSizeControl(onChange) {
+// buildBetAmountControl, just constrained to whole matches. label lets the
+// band optimizer spell out that the floor applies per win-probability band,
+// not to the search's total match count.
+function buildMinSampleSizeControl(onChange, label = "Minimum sample size (matches)") {
   const container = document.createElement("div");
   container.className = "percent-control bet-amount-control";
   container.innerHTML = `
-    <label for="min-sample-size-input">Minimum sample size (matches)</label>
+    <label for="min-sample-size-input">${label}</label>
     <input id="min-sample-size-input" type="number" min="1" step="1" value="20" />
+  `;
+  const input = container.querySelector("input");
+  input.addEventListener("input", onChange);
+  return { container, input };
+}
+
+// Numeric input for the band optimizer's win-probability band width (in
+// percentage points) — same styling as buildMinSampleSizeControl.
+function buildBandWidthControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "percent-control bet-amount-control";
+  container.innerHTML = `
+    <label for="band-width-input">Win-probability band width (%)</label>
+    <input id="band-width-input" type="number" min="0.5" step="0.5" value="${BAND_OPTIMIZER_BAND_WIDTH}" />
   `;
   const input = container.querySelector("input");
   input.addEventListener("input", onChange);
@@ -1439,7 +1461,7 @@ function sidebarFiltersCacheable() {
 
 function optimizerCacheKey(widgetId, params) {
   const pandascoreOnly = document.getElementById("only-pandascore-start").checked;
-  return `optimizer-cache:v${OPTIMIZER_CACHE_VERSION}:${widgetId}:${params.side}:${params.betAmount}:${params.minSampleSize}:${params.spread}:${params.feeSim}:${pandascoreOnly}`;
+  return `optimizer-cache:v${OPTIMIZER_CACHE_VERSION}:${widgetId}:${params.side}:${params.betAmount}:${params.minSampleSize}:${params.spread}:${params.feeSim}:${params.bandWidth}:${pandascoreOnly}`;
 }
 
 function loadCachedOptimizerResult(widgetId, params) {
@@ -1493,9 +1515,10 @@ const OPTIMIZER_CONFIG = {
 const BAND_OPTIMIZER_CONFIG = {
   id: "widget-optimizer-bands",
   title: "Optimal exit policy by win probability (max profit, by pre-match volume)",
-  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into fixed 2.5%-wide win-probability bands and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. Bands whose best exit still loses money are skipped (“no bet”); pre-match volume stays a single shared range; the minimum sample size applies per band. Same grid-search caveats and spread/fee simulation as above.",
+  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into fixed-width win-probability bands (width set below) and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. Bands whose best exit still loses money are skipped (“no bet”); pre-match volume stays a single shared range. Minimum sample size is a per-band floor, not a floor on the total match count — each band needs that many matches of its own to be searched at all, so narrower bands (or a stricter floor) leave more edge bands skipped for lack of data. Same grid-search caveats and spread/fee simulation as above.",
   run: runBandOptimizer,
   render: renderBandOptimizerResult,
+  bandWidth: true,
 };
 
 // Unlike the EV-curve widgets above, this one doesn't recompute on every
@@ -1540,11 +1563,14 @@ function buildOptimizerWidget(config) {
 
   const els = {
     betAmount: buildBetAmountControl(markStale),
-    minSampleSize: buildMinSampleSizeControl(markStale),
+    minSampleSize: buildMinSampleSizeControl(markStale, config.bandWidth ? "Minimum sample size (matches per band)" : undefined),
+    bandWidth: config.bandWidth ? buildBandWidthControl(markStale) : null,
     spread: buildSpreadControl(markStale),
     feeSim: buildFeeSimControl(markStale),
   };
-  rangeControls.append(els.betAmount.container, els.minSampleSize.container, els.spread.container, els.feeSim.container);
+  rangeControls.append(els.betAmount.container, els.minSampleSize.container);
+  if (els.bandWidth) rangeControls.append(els.bandWidth.container);
+  rangeControls.append(els.spread.container, els.feeSim.container);
 
   widget.querySelectorAll(".side-toggle button").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1558,6 +1584,7 @@ function buildOptimizerWidget(config) {
     side: local.side,
     betAmount: Number(els.betAmount.input.value) || 0,
     minSampleSize: Math.max(1, Math.round(Number(els.minSampleSize.input.value) || 1)),
+    bandWidth: els.bandWidth ? Math.max(0.5, Number(els.bandWidth.input.value) || BAND_OPTIMIZER_BAND_WIDTH) : undefined,
     spread: els.spread.checkbox.checked,
     feeSim: els.feeSim.select.value,
   });
@@ -1586,7 +1613,8 @@ function buildOptimizerWidget(config) {
         progressFill.style.width = `${Math.round(fraction * 100)}%`;
         progressLabel.textContent = `${Math.round(fraction * 100)}%`;
       },
-      () => token === local.runToken
+      () => token === local.runToken,
+      params.bandWidth
     );
 
     if (token !== local.runToken) return; // superseded by a newer run
