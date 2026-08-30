@@ -85,6 +85,7 @@ _PAGE = """<!doctype html>
   details.log-section summary::before {{ content: "\\25b8"; display: inline-block; margin-right: 0.4rem; color: var(--text-dim); transition: transform 0.15s ease; }}
   details.log-section[open] summary::before {{ transform: rotate(90deg); }}
   details.log-section summary .count {{ color: var(--text-dim); font-weight: 400; }}
+  tr.date-divider td {{ background: rgba(15, 23, 42, 0.035); color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.5rem 0.6rem; text-align: left; }}
 </style>
 </head>
 <body>
@@ -249,7 +250,7 @@ _OPEN_ROW = (
 
 _CLOSED_ROW = (
     "<tr><td class=\"col-text\">{match_label}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
-    "<td>{buy_time}<br><span class=\"reason\">{sell_time}</span></td>"
+    "<td>{buy_time}<br>{sell_time}</td>"
     "<td>{contracts}</td>"
     "<td>${entry:.2f}</td><td>{exit}</td>"
     "<td>{return_cell}</td><td>{reason}</td></tr>"
@@ -300,7 +301,7 @@ def _open_position_row(position: dict) -> str:
         ticker=html.escape(position.get("ticker", "")),
         contracts=position.get("contracts", 0),
         entry=float(position.get("entry_price_dollars", 0)),
-        buy_time=html.escape(_to_second_precision(position.get("entry_time", ""))),
+        buy_time=html.escape(_time_only(position.get("entry_time", ""))),
     )
 
 
@@ -315,9 +316,9 @@ def _closed_position_row(position: dict) -> str:
         ticker=html.escape(position.get("ticker", "")),
         contracts=contracts,
         entry=entry_price,
-        buy_time=html.escape(_to_second_precision(position.get("entry_time", ""))),
+        buy_time=html.escape(_time_only(position.get("entry_time", ""))),
         exit=f"${exit_price_float:.2f}" if exit_price_float is not None else "-",
-        sell_time=html.escape(_to_second_precision(position.get("exit_time", ""))) if position.get("exit_time") else "-",
+        sell_time=html.escape(_time_only(position.get("exit_time", ""))) if position.get("exit_time") else "-",
         return_cell=_return_cell(entry_price, exit_price_float, contracts),
         reason=html.escape(str(position.get("exit_reason", "-"))),
     )
@@ -355,19 +356,55 @@ def _decision_passed_detail(item: dict) -> str:
     return f"{detail} &middot; {html.escape(note)}" if note else detail
 
 
-def _to_second_precision(iso_timestamp: str) -> str:
+def _parse_local(iso_timestamp: str) -> datetime | None:
     try:
-        dt = datetime.fromisoformat(iso_timestamp).astimezone(ZoneInfo("America/New_York"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+        return datetime.fromisoformat(iso_timestamp).astimezone(ZoneInfo("America/New_York"))
     except ValueError:
-        return iso_timestamp
+        return None
+
+
+def _time_only(iso_timestamp: str) -> str:
+    dt = _parse_local(iso_timestamp)
+    return dt.strftime("%H:%M:%S %Z") if dt else iso_timestamp
+
+
+def _date_key(iso_timestamp: str) -> str:
+    dt = _parse_local(iso_timestamp)
+    return dt.strftime("%Y-%m-%d") if dt else iso_timestamp
+
+
+def _ordinal(day: int) -> str:
+    suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{day}{suffix}"
+
+
+def _date_divider_label(iso_timestamp: str) -> str:
+    dt = _parse_local(iso_timestamp)
+    return f"{dt.strftime('%B')} {_ordinal(dt.day)}, {dt.year}" if dt else iso_timestamp
+
+
+def _grouped_rows(items: list, date_field, row_fn, colspan: int) -> str:
+    """Renders `items` (already sorted most-recent-first) as table rows with
+    a divider row inserted whenever the calendar date (from `date_field`,
+    America/New_York) changes, so datetime columns in `row_fn` only need to
+    show a time — the divider carries the date."""
+    parts = []
+    last_key = None
+    for item in items:
+        timestamp = date_field(item)
+        key = _date_key(timestamp)
+        if key != last_key:
+            parts.append(f'<tr class="date-divider"><td colspan="{colspan}">{html.escape(_date_divider_label(timestamp))}</td></tr>')
+            last_key = key
+        parts.append(row_fn(item))
+    return "".join(parts)
 
 
 def _decision_row(item: dict) -> str:
     status = item.get("status", "")
     detail = _decision_passed_detail(item) if status == "passed" else html.escape(item.get("reason") or "")
     return _DECISION_ROW.format(
-        scanned_at=html.escape(_to_second_precision(item.get("scanned_at", ""))),
+        scanned_at=html.escape(_time_only(item.get("scanned_at", ""))),
         teams=html.escape(" vs ".join(item.get("team_names", []))),
         event_ticker=html.escape(item.get("event_ticker", "")),
         status=status,
@@ -426,7 +463,7 @@ def _position_trade_events(position: dict) -> list[dict]:
 
 def _trade_row(event: dict) -> str:
     return _TRADE_ROW.format(
-        time=html.escape(_to_second_precision(event["time"])),
+        time=html.escape(_time_only(event["time"])),
         badge_class=event["badge_class"],
         action_label=event["action_label"],
         team_name=html.escape(event["team_name"]),
@@ -495,13 +532,16 @@ def render_dashboard(
         stop_loss_percent=config.stop_loss_percent,
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
-        position_rows="".join(_open_position_row(p) for p in active_positions) or "<tr><td colspan=4>none open</td></tr>",
+        position_rows=_grouped_rows(active_positions, lambda p: p.get("entry_time", ""), _open_position_row, 4)
+        or "<tr><td colspan=4>none open</td></tr>",
         closed_position_count=len(closed_positions),
-        closed_position_rows="".join(_closed_position_row(p) for p in closed_positions) or "<tr><td colspan=7>none yet</td></tr>",
+        closed_position_rows=_grouped_rows(closed_positions, lambda p: p.get("entry_time", ""), _closed_position_row, 7)
+        or "<tr><td colspan=7>none yet</td></tr>",
         trade_count=len(trade_events),
         trade_truncated_note=trade_truncated_note,
-        trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",
+        trade_rows=_grouped_rows(shown_trades, lambda e: e["time"], _trade_row, 8) or "<tr><td colspan=8>no trades yet</td></tr>",
         decision_count=len(sorted_scans),
         decision_truncated_note=decision_truncated_note,
-        decision_rows="".join(_decision_row(r) for r in shown_scans) or "<tr><td colspan=4>no decisions recorded yet</td></tr>",
+        decision_rows=_grouped_rows(shown_scans, lambda r: r.get("scanned_at", ""), _decision_row, 4)
+        or "<tr><td colspan=4>no decisions recorded yet</td></tr>",
     )
