@@ -610,11 +610,10 @@ const BAND_OPTIMIZER_BAND_WIDTH = 2.5;
 // Contiguous fixed-width win-probability bands partitioning `pairs` for
 // the band optimizer — bandWidth points each, aligned to multiples of the
 // width and spanning the observed range. Fixed widths keep bands
-// comparable across sides, filters, and cached runs (quantile edges would
-// move with the data); sparse edge bands just fall under the per-band
-// sample floor and render as skipped. Bands are [lo, hi), except the last,
-// which includes its upper edge so the max-probability match still lands
-// in a band.
+// comparable across sides and filters (quantile edges would move with the
+// data); sparse edge bands just fall under the per-band sample floor and
+// render as skipped. Bands are [lo, hi), except the last, which includes
+// its upper edge so the max-probability match still lands in a band.
 function winProbBands(pairs, side, bandWidth) {
   const winProbs = pairs.map((p) => p.stat[`${side}_start_price`] * 100);
   if (winProbs.length === 0) return [];
@@ -1479,74 +1478,6 @@ const STOP_LOSS_DOLLAR_CONFIG = {
   formatTooltipValue: formatDollarsTooltipValue,
 };
 
-// --- Optimizer result cache -------------------------------------------
-//
-// A finished grid search over the full match set is worth keeping around:
-// the search is the slowest computation on the page and its inputs rarely
-// change. Results live in localStorage, keyed by widget id plus every
-// control that feeds the search — but only while the sidebar is in its
-// "all matches" state (empty search, no date range; the PandaScore-only
-// checkbox is part of the key instead), since filtered subsets are endless
-// and each one is cheap relative to its specificity. The match set still
-// grows as new data lands, so a cache hit is never passed off as fresh:
-// it renders with a banner saying when it was computed and over how many
-// matches, plus a Recalculate button that redoes the search for real.
-// v2: band optimizer switched from quantile buckets to fixed 2.5% bands.
-// v3: band optimizer's "bet" decision switched from any positive profit to
-// clearing a 95% margin of error (see marginOfError) — older cached
-// results may flag bands as profitable that this version would reject as
-// noise, so they're ignored.
-const OPTIMIZER_CACHE_VERSION = 3;
-
-function sidebarFiltersCacheable() {
-  return (
-    document.getElementById("analysis-search").value.trim() === "" &&
-    document.getElementById("analysis-date-from").value === "" &&
-    document.getElementById("analysis-date-to").value === ""
-  );
-}
-
-function optimizerCacheKey(widgetId, params) {
-  const pandascoreOnly = document.getElementById("only-pandascore-start").checked;
-  return `optimizer-cache:v${OPTIMIZER_CACHE_VERSION}:${widgetId}:${params.side}:${params.betAmount}:${params.minSampleSize}:${params.spread}:${params.feeSim}:${params.bandWidth}:${pandascoreOnly}`;
-}
-
-function loadCachedOptimizerResult(widgetId, params) {
-  if (!sidebarFiltersCacheable()) return null;
-  try {
-    const raw = localStorage.getItem(optimizerCacheKey(widgetId, params));
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveCachedOptimizerResult(widgetId, params, best, matchCount) {
-  if (!sidebarFiltersCacheable()) return;
-  try {
-    localStorage.setItem(optimizerCacheKey(widgetId, params), JSON.stringify({ best, matchCount, computedAt: Date.now() }));
-  } catch {
-    // localStorage full or unavailable — skip caching, never block the run.
-  }
-}
-
-// Banner prepended to a cached optimizer render: when the cached run
-// happened and over how many matches, flagging drift if the current filter
-// set has since changed size, with a button to redo the search for real.
-function buildCacheBanner(cached, onRecalculate) {
-  const banner = document.createElement("div");
-  banner.className = "optimizer-cache-banner";
-  const computedAt = new Date(cached.computedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-  const currentCount = eventStatPairs(sidebarFilteredEvents()).length;
-  const drift = currentCount === cached.matchCount ? "" : ` — ${currentCount} match the filters now`;
-  banner.innerHTML = `
-    <span>Cached result from ${computedAt}, computed over ${cached.matchCount} matches${drift}.</span>
-    <button type="button" class="optimizer-recalculate-button">Recalculate</button>
-  `;
-  banner.querySelector("button").addEventListener("click", onRecalculate);
-  return banner;
-}
-
 // config: { id, title, note, run, render } — run is the async grid search
 // (runOptimizer's signature) and render draws its winning result
 // (renderOptimizerResult's signature), so the single-threshold optimizer
@@ -1668,15 +1599,7 @@ function buildOptimizerWidget(config) {
 
     progressEl.hidden = true;
     runButton.disabled = false;
-    saveCachedOptimizerResult(config.id, params, best, pairs.length);
     renderResult(best, params, pairs.length);
-  };
-
-  // A cache hit renders instantly but never silently: the banner names the
-  // cached run's age and sample, and offers the real search instead.
-  const showCachedResult = (cached, params) => {
-    renderResult(cached.best, params, cached.matchCount);
-    resultEl.prepend(buildCacheBanner(cached, () => runSearch(params)));
   };
 
   runButton.addEventListener("click", () => {
@@ -1687,10 +1610,7 @@ function buildOptimizerWidget(config) {
       return;
     }
 
-    const params = currentParams();
-    const cached = loadCachedOptimizerResult(config.id, params);
-    if (cached) showCachedResult(cached, params);
-    else runSearch(params);
+    runSearch(currentParams());
   });
 
   return widget;
