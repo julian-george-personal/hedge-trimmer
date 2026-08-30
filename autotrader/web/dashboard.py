@@ -16,7 +16,7 @@ _PAGE = """<!doctype html>
 <title>hedge trimmer - dashboard</title>
 <style>
   :root {{
-    --bg: #f5f6f8;
+    --bg: #ffffff;
     --panel: #ffffff;
     --border: #dde1e8;
     --text: #1b1f27;
