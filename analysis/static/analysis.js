@@ -1392,6 +1392,69 @@ const STOP_LOSS_DOLLAR_CONFIG = {
   formatTooltipValue: formatDollarsTooltipValue,
 };
 
+// --- Optimizer result cache -------------------------------------------
+//
+// A finished grid search over the full match set is worth keeping around:
+// the search is the slowest computation on the page and its inputs rarely
+// change. Results live in localStorage, keyed by widget id plus every
+// control that feeds the search — but only while the sidebar is in its
+// "all matches" state (empty search, no date range; the PandaScore-only
+// checkbox is part of the key instead), since filtered subsets are endless
+// and each one is cheap relative to its specificity. The match set still
+// grows as new data lands, so a cache hit is never passed off as fresh:
+// it renders with a banner saying when it was computed and over how many
+// matches, plus a Recalculate button that redoes the search for real.
+const OPTIMIZER_CACHE_VERSION = 1;
+
+function sidebarFiltersCacheable() {
+  return (
+    document.getElementById("analysis-search").value.trim() === "" &&
+    document.getElementById("analysis-date-from").value === "" &&
+    document.getElementById("analysis-date-to").value === ""
+  );
+}
+
+function optimizerCacheKey(widgetId, params) {
+  const pandascoreOnly = document.getElementById("only-pandascore-start").checked;
+  return `optimizer-cache:v${OPTIMIZER_CACHE_VERSION}:${widgetId}:${params.side}:${params.betAmount}:${params.minSampleSize}:${params.spread}:${params.feeSim}:${pandascoreOnly}`;
+}
+
+function loadCachedOptimizerResult(widgetId, params) {
+  if (!sidebarFiltersCacheable()) return null;
+  try {
+    const raw = localStorage.getItem(optimizerCacheKey(widgetId, params));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedOptimizerResult(widgetId, params, best, matchCount) {
+  if (!sidebarFiltersCacheable()) return;
+  try {
+    localStorage.setItem(optimizerCacheKey(widgetId, params), JSON.stringify({ best, matchCount, computedAt: Date.now() }));
+  } catch {
+    // localStorage full or unavailable — skip caching, never block the run.
+  }
+}
+
+// Banner prepended to a cached optimizer render: when the cached run
+// happened and over how many matches, flagging drift if the current filter
+// set has since changed size, with a button to redo the search for real.
+function buildCacheBanner(cached, onRecalculate) {
+  const banner = document.createElement("div");
+  banner.className = "optimizer-cache-banner";
+  const computedAt = new Date(cached.computedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const currentCount = eventStatPairs(sidebarFilteredEvents()).length;
+  const drift = currentCount === cached.matchCount ? "" : ` — ${currentCount} match the filters now`;
+  banner.innerHTML = `
+    <span>Cached result from ${computedAt}, computed over ${cached.matchCount} matches${drift}.</span>
+    <button type="button" class="optimizer-recalculate-button">Recalculate</button>
+  `;
+  banner.querySelector("button").addEventListener("click", onRecalculate);
+  return banner;
+}
+
 // config: { id, title, note, run, render } — run is the async grid search
 // (runOptimizer's signature) and render draws its winning result
 // (renderOptimizerResult's signature), so the single-threshold optimizer
@@ -1468,19 +1531,19 @@ function buildOptimizerWidget(config) {
     });
   });
 
-  runButton.addEventListener("click", async () => {
-    if (!state.statsLoaded) {
-      resultEl.hidden = false;
-      resultEl.classList.remove("optimizer-result-stale");
-      resultEl.innerHTML = `<div class="optimizer-result-empty">Loading match price data (first load can take a minute or two)…</div>`;
-      return;
-    }
+  const currentParams = () => ({
+    side: local.side,
+    betAmount: Number(els.betAmount.input.value) || 0,
+    minSampleSize: Math.max(1, Math.round(Number(els.minSampleSize.input.value) || 1)),
+    spread: els.spread.checkbox.checked,
+    feeSim: els.feeSim.select.value,
+  });
 
+  const renderResult = (best, params, totalMatches) =>
+    config.render(resultEl, best, params.side, params.betAmount, params.minSampleSize, params.spread, params.feeSim, totalMatches);
+
+  const runSearch = async (params) => {
     const token = ++local.runToken;
-    const betAmount = Number(els.betAmount.input.value) || 0;
-    const minSampleSize = Math.max(1, Math.round(Number(els.minSampleSize.input.value) || 1));
-    const spread = els.spread.checkbox.checked;
-    const feeSim = els.feeSim.select.value;
     const pairs = eventStatPairs(sidebarFilteredEvents());
 
     runButton.disabled = true;
@@ -1491,11 +1554,11 @@ function buildOptimizerWidget(config) {
 
     const best = await config.run(
       pairs,
-      local.side,
-      betAmount,
-      minSampleSize,
-      spread,
-      feeSim,
+      params.side,
+      params.betAmount,
+      params.minSampleSize,
+      params.spread,
+      params.feeSim,
       (fraction) => {
         progressFill.style.width = `${Math.round(fraction * 100)}%`;
         progressLabel.textContent = `${Math.round(fraction * 100)}%`;
@@ -1507,7 +1570,29 @@ function buildOptimizerWidget(config) {
 
     progressEl.hidden = true;
     runButton.disabled = false;
-    config.render(resultEl, best, local.side, betAmount, minSampleSize, spread, feeSim, pairs.length);
+    saveCachedOptimizerResult(config.id, params, best, pairs.length);
+    renderResult(best, params, pairs.length);
+  };
+
+  // A cache hit renders instantly but never silently: the banner names the
+  // cached run's age and sample, and offers the real search instead.
+  const showCachedResult = (cached, params) => {
+    renderResult(cached.best, params, cached.matchCount);
+    resultEl.prepend(buildCacheBanner(cached, () => runSearch(params)));
+  };
+
+  runButton.addEventListener("click", () => {
+    if (!state.statsLoaded) {
+      resultEl.hidden = false;
+      resultEl.classList.remove("optimizer-result-stale");
+      resultEl.innerHTML = `<div class="optimizer-result-empty">Loading match price data (first load can take a minute or two)…</div>`;
+      return;
+    }
+
+    const params = currentParams();
+    const cached = loadCachedOptimizerResult(config.id, params);
+    if (cached) showCachedResult(cached, params);
+    else runSearch(params);
   });
 
   return widget;
