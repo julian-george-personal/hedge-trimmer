@@ -13,7 +13,8 @@ from autotrader.trading.monitor import check_open_positions
 
 logger = logging.getLogger("autotrader.loop")
 
-POLL_INTERVAL_SECONDS = 30
+SCAN_INTERVAL_SECONDS = 30
+MONITOR_INTERVAL_SECONDS = 1
 
 # The only statuses that represent the trader actually reaching a betting
 # decision for a match (i.e. it's entered the lead-time window). "no_match"
@@ -67,18 +68,27 @@ class Runner:
             len(results), len(decisions), dict(Counter(r.status for r in decisions)),
         )
 
-    def tick(self) -> None:
+    def tick(self, run_scan: bool) -> None:
+        """run_scan gates the (expensive, PandaScore-backed) entry scan to
+        once every SCAN_INTERVAL_SECONDS, while exit checks — cheap, single
+        Kalshi quote lookups per open position — run every tick so a
+        stop-loss/take-profit is caught within MONITOR_INTERVAL_SECONDS of
+        crossing, not up to SCAN_INTERVAL_SECONDS later. The summary log line
+        is scan-gated too — logging it every MONITOR_INTERVAL_SECONDS would
+        flood CloudWatch with an unchanged line once a second for as long as
+        a position is open; exits already log themselves in monitor.py."""
         config = load_config(self.store)
-        open_positions = self.store.list_open_positions()
-        logger.info(
-            "tick: enabled=%s armed=%s side=%s open_positions=%d",
-            config.enabled, config.armed, config.side, len(open_positions),
-        )
 
-        try:
-            self._scan_and_act(config)
-        except Exception:
-            logger.exception("error while scanning for new matches to enter")
+        if run_scan:
+            open_positions = self.store.list_open_positions()
+            logger.info(
+                "tick: enabled=%s armed=%s side=%s open_positions=%d",
+                config.enabled, config.armed, config.side, len(open_positions),
+            )
+            try:
+                self._scan_and_act(config)
+            except Exception:
+                logger.exception("error while scanning for new matches to enter")
 
         try:
             check_open_positions(self.kalshi_client, self.store, config)
@@ -86,14 +96,21 @@ class Runner:
             logger.exception("error while checking open positions for exit")
 
     def run(self) -> None:
-        logger.info("autotrader loop starting, polling every %ds", POLL_INTERVAL_SECONDS)
+        logger.info(
+            "autotrader loop starting: scanning for entries every %ds, monitoring open positions every %ds",
+            SCAN_INTERVAL_SECONDS, MONITOR_INTERVAL_SECONDS,
+        )
+        next_scan_at = time.monotonic()
         while True:
+            run_scan = time.monotonic() >= next_scan_at
             try:
-                self.tick()
+                self.tick(run_scan)
             except Exception:
                 # A failure loading config (e.g. DynamoDB unreachable) would
                 # otherwise be uncaught and silently kill this background
                 # thread forever, while the web server keeps reporting
                 # healthy — better to log and keep retrying every tick.
                 logger.exception("unhandled error in autotrader loop tick")
-            time.sleep(POLL_INTERVAL_SECONDS)
+            if run_scan:
+                next_scan_at = time.monotonic() + SCAN_INTERVAL_SECONDS
+            time.sleep(MONITOR_INTERVAL_SECONDS)

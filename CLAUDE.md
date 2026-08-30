@@ -64,6 +64,41 @@ Run these `node`/`npx`/`playwright` commands and the app itself with
 `dangerouslyDisableSandbox: true` — network access and the browser download
 are blocked otherwise.
 
+## Viewing autotrader logs and DynamoDB table
+
+The autotrader runs on AWS App Runner (service name `hedge-trimmer-autotrader`,
+provisioned in the `personal-terraform` repo). These are read-only lookups —
+never modify these resources directly; changes go through Terraform (see
+global CLAUDE.md).
+
+Logs (App Runner writes to CloudWatch Logs under a per-service log group):
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix /aws/apprunner/hedge-trimmer-autotrader
+# pick the "...service" or "...application" group from the output, then:
+aws logs tail /aws/apprunner/hedge-trimmer-autotrader/<service-id>/application --follow
+```
+
+DynamoDB table (name `hedge-trimmer-autotrader`, single-table design with a
+`PK`/`SK` key schema):
+
+```bash
+# current trading config
+aws dynamodb get-item --table-name hedge-trimmer-autotrader \
+  --key '{"PK": {"S": "CONFIG"}, "SK": {"S": "CONFIG"}}'
+
+# a specific position (event ticker required)
+aws dynamodb get-item --table-name hedge-trimmer-autotrader \
+  --key '{"PK": {"S": "POSITION#<event_ticker>"}, "SK": {"S": "POSITION"}}'
+
+# full table dump (positions + market scans + config)
+aws dynamodb scan --table-name hedge-trimmer-autotrader
+```
+
+Item shapes: `PK=CONFIG, SK=CONFIG` (trading config), `PK=POSITION#<event_ticker>, SK=POSITION`
+(open/closed position), `PK=SCAN#<event_ticker>, SK=<scanned_at>` (market scan history).
+See `autotrader/storage/state.py` for the exact key helpers.
+
 ## Frontend structure
 
 Static UI lives in `analysis/static/`, served by `analysis/server.py`. No

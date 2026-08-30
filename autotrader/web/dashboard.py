@@ -4,7 +4,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from autotrader.storage.config import TradingConfig
-from autotrader.trading.loop import POLL_INTERVAL_SECONDS
+from autotrader.trading.loop import SCAN_INTERVAL_SECONDS
 
 MAX_DECISION_ROWS_DISPLAYED = 200
 MAX_TRADE_ROWS_DISPLAYED = 200
@@ -24,6 +24,7 @@ _PAGE = """<!doctype html>
     --accent: #4f8cff;
     --yes: #3fbf7f;
     --no: #e0555a;
+    --warn: #e0b13f;
   }}
   * {{ box-sizing: border-box; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; background: var(--bg); color: var(--text); max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }}
@@ -68,7 +69,7 @@ _PAGE = """<!doctype html>
   .badge.passed {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
   .badge.filtered {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
   .badge.already_positioned {{ background: rgba(79, 140, 255, 0.15); color: var(--accent); }}
-  .badge.buy {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
+  .badge.buy {{ background: rgba(224, 177, 63, 0.15); color: var(--warn); }}
   .badge.sell-profit {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
   .badge.sell-loss {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
   .badge.sell {{ background: rgba(79, 140, 255, 0.15); color: var(--accent); }}
@@ -170,6 +171,14 @@ _PAGE = """<!doctype html>
   <tr><th>Match</th><th>Status</th><th>Ticker</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Mode</th></tr>
   {position_rows}
 </table>
+
+<details class="log-section">
+  <summary>Closed positions <span class="count">({closed_position_count})</span></summary>
+  <table>
+    <tr><th>Match</th><th>Status</th><th>Ticker</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Mode</th></tr>
+    {closed_position_rows}
+  </table>
+</details>
 
 <details class="log-section">
   <summary>Trading log <span class="count">({trade_count} fills)</span></summary>
@@ -381,6 +390,8 @@ def render_dashboard(
     saved: bool = False,
 ) -> str:
     sorted_positions = sorted(positions, key=lambda p: p.get("entry_time", ""), reverse=True)
+    active_positions = [p for p in sorted_positions if p.get("status") != "closed"]
+    closed_positions = [p for p in sorted_positions if p.get("status") == "closed"]
     sorted_scans = sorted(market_scans, key=lambda r: r.get("scanned_at", ""), reverse=True)
     shown_scans = sorted_scans[:MAX_DECISION_ROWS_DISPLAYED]
     decision_truncated_note = (
@@ -402,7 +413,7 @@ def render_dashboard(
     return _PAGE.format(
         saved_banner=(
             '<div class="banner saved">&#10003; Filters applied. The running loop will use these values on its '
-            f"next tick (within {POLL_INTERVAL_SECONDS}s).</div>"
+            f"next tick (within {SCAN_INTERVAL_SECONDS}s).</div>"
             if saved
             else ""
         ),
@@ -428,7 +439,9 @@ def render_dashboard(
         stop_loss_percent=config.stop_loss_percent,
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
-        position_rows="".join(_position_row(p) for p in sorted_positions) or "<tr><td colspan=8>none yet</td></tr>",
+        position_rows="".join(_position_row(p) for p in active_positions) or "<tr><td colspan=8>none open</td></tr>",
+        closed_position_count=len(closed_positions),
+        closed_position_rows="".join(_position_row(p) for p in closed_positions) or "<tr><td colspan=8>none yet</td></tr>",
         trade_count=len(trade_events),
         trade_truncated_note=trade_truncated_note,
         trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",
