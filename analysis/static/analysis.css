@@ -397,8 +397,15 @@
   font-weight: 600;
 }
 
-.range-control + .range-control {
-  margin-top: 16px;
+/* Vertical rhythm for every control stacked in a widget's filter area:
+   gap is the space BETWEEN fields (volume range, win-prob range, stop-loss,
+   ...), deliberately wider than each label's own margin-bottom to its
+   input below (see .range-control/.percent-control label) — so a label
+   always reads as glued to its own control, not to the field above it. */
+.range-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .range-control label {
