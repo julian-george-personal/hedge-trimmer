@@ -59,6 +59,7 @@ def enter_position(
             "status": "open",
             "ticker": result.side_ticker,
             "team_name": result.side_team_name,
+            "team_names": result.team_names,
             "entry_price_dollars": Decimal(str(result.entry_price_dollars)),
             "contracts": contracts,
             "entry_time": datetime.now(timezone.utc).isoformat(),

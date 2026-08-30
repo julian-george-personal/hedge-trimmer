@@ -27,7 +27,8 @@ _PAGE = """<!doctype html>
     --warn: #e0b13f;
   }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; background: var(--bg); color: var(--text); max-width: 900px; margin: 0 auto; padding: 24px 16px 48px; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; background: var(--bg); color: var(--text); max-width: 1400px; margin: 0 auto; padding: 24px 16px 48px; }}
+  .narrow {{ max-width: 760px; margin: 0 auto; }}
   h1, h2 {{ font-weight: 600; }}
   h1 {{ font-size: 18px; }}
   h2 {{ font-size: 15px; margin-top: 2rem; }}
@@ -56,7 +57,8 @@ _PAGE = """<!doctype html>
   button.icon-btn.stop {{ background: rgba(224, 85, 90, 0.12); border-color: var(--no); color: var(--no); }}
   button.icon-btn.play {{ background: rgba(63, 191, 127, 0.12); border-color: var(--yes); color: var(--yes); }}
   table {{ width: 100%; border-collapse: collapse; margin-top: 0.5rem; }}
-  th, td {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 13px; }}
+  th, td {{ text-align: center; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); font-size: 13px; }}
+  th.col-text, td.col-text {{ text-align: left; }}
   th {{ color: var(--text-dim); font-weight: 500; }}
   label {{ display: block; margin-top: 0.6rem; font-size: 12px; color: var(--text-dim); }}
   input, select {{ font: inherit; width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem; }}
@@ -64,7 +66,7 @@ _PAGE = """<!doctype html>
   .row {{ display: flex; gap: 1rem; }}
   .row > div {{ flex: 1; }}
   .save {{ margin-top: 1rem; }}
-  .hint {{ color: var(--text-dim); font-size: 12px; margin-bottom: 1rem; }}
+  .hint {{ color: var(--text-dim); font-size: 12px; margin-bottom: 1rem; max-width: 760px; }}
   .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 11px; font-weight: 600; }}
   .badge.passed {{ background: rgba(63, 191, 127, 0.12); color: var(--yes); }}
   .badge.filtered {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
@@ -88,6 +90,7 @@ _PAGE = """<!doctype html>
 <body>
 <h1>autotrader</h1>
 
+<div class="narrow">
 <div id="saved-banner">{saved_banner}</div>
 
 <div class="status {running_class}">
@@ -168,17 +171,18 @@ _PAGE = """<!doctype html>
   </div>
   <div class="save"><button type="submit">Apply filters</button></div>
 </form>
+</div>
 
 <h2>Open Positions</h2>
 <table>
-  <tr><th>Match</th><th>Contracts</th><th>Entry</th></tr>
+  <tr><th class="col-text">Match</th><th>Contracts</th><th>Entry</th><th>Bought</th></tr>
   {position_rows}
 </table>
 
 <details class="log-section">
   <summary>Closed positions <span class="count">({closed_position_count})</span></summary>
   <table>
-    <tr><th>Match</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Return</th><th>Reason</th></tr>
+    <tr><th class="col-text">Match</th><th>Contracts</th><th>Entry</th><th>Bought</th><th>Exit</th><th>Sold</th><th>Return</th><th>Reason</th></tr>
     {closed_position_rows}
   </table>
 </details>
@@ -188,7 +192,7 @@ _PAGE = """<!doctype html>
   <p class="hint">Every buy and sell the trader has placed (or would have, in dry run), most recent first.</p>
   {trade_truncated_note}
   <table>
-    <tr><th>Time</th><th>Action</th><th>Match</th><th>Ticker</th><th>Contracts</th><th>Price</th><th>Detail</th><th>Mode</th></tr>
+    <tr><th>Time</th><th>Action</th><th class="col-text">Match</th><th>Ticker</th><th>Contracts</th><th>Price</th><th class="col-text">Detail</th><th>Mode</th></tr>
     {trade_rows}
   </table>
 </details>
@@ -200,7 +204,7 @@ _PAGE = """<!doctype html>
   is history, not a live snapshot.</p>
   {decision_truncated_note}
   <table>
-    <tr><th>Scanned at</th><th>Match</th><th>Status</th><th>Reason / detail</th></tr>
+    <tr><th>Scanned at</th><th class="col-text">Match</th><th>Status</th><th class="col-text">Reason / detail</th></tr>
     {decision_rows}
   </table>
 </details>
@@ -237,15 +241,16 @@ function autotraderOnArmedToggle(checkbox) {{
 _DRY_RUN_MARKER = '<span class="dry-run-marker" title="Dry run — no real order was placed">*</span>'
 
 _OPEN_ROW = (
-    "<tr><td>{team_name}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
+    "<tr><td class=\"col-text\">{match_label}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
     "<td>{contracts}</td>"
-    "<td>${entry:.2f}</td></tr>"
+    "<td>${entry:.2f}</td><td>{buy_time}</td></tr>"
 )
 
 _CLOSED_ROW = (
-    "<tr><td>{team_name}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
+    "<tr><td class=\"col-text\">{match_label}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
     "<td>{contracts}</td>"
-    "<td>${entry:.2f}</td><td>{exit}</td><td>{return_cell}</td><td>{reason}</td></tr>"
+    "<td>${entry:.2f}</td><td>{buy_time}</td><td>{exit}</td><td>{sell_time}</td>"
+    "<td>{return_cell}</td><td>{reason}</td></tr>"
 )
 
 _STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>'
@@ -259,9 +264,9 @@ _DECISION_STATUS_LABELS = {
 
 _DECISION_ROW = (
     "<tr><td>{scanned_at}</td>"
-    "<td>{teams}<br><span class=\"reason\">{event_ticker}</span></td>"
+    "<td class=\"col-text\">{teams}<br><span class=\"reason\">{event_ticker}</span></td>"
     "<td><span class=\"badge {status}\">{status_label}</span></td>"
-    "<td class=\"reason\">{detail}</td></tr>"
+    "<td class=\"reason col-text\">{detail}</td></tr>"
 )
 
 
@@ -278,13 +283,22 @@ def _return_cell(entry_price: float, exit_price: float | None, contracts: int) -
     )
 
 
+def _match_label(position: dict) -> str:
+    bet_team = position.get("team_name") or "-"
+    team_names = position.get("team_names")
+    if team_names and len(team_names) == 2:
+        return f"{html.escape(team_names[0])} vs {html.escape(team_names[1])} ({html.escape(bet_team)})"
+    return html.escape(bet_team)
+
+
 def _open_position_row(position: dict) -> str:
     return _OPEN_ROW.format(
-        team_name=html.escape(position.get("team_name") or "-"),
+        match_label=_match_label(position),
         dry_run_marker=_DRY_RUN_MARKER if position.get("dry_run", True) else "",
         ticker=html.escape(position.get("ticker", "")),
         contracts=position.get("contracts", 0),
         entry=float(position.get("entry_price_dollars", 0)),
+        buy_time=html.escape(_to_second_precision(position.get("entry_time", ""))),
     )
 
 
@@ -294,12 +308,14 @@ def _closed_position_row(position: dict) -> str:
     exit_price_float = float(exit_price) if exit_price is not None else None
     contracts = int(position.get("contracts", 0))
     return _CLOSED_ROW.format(
-        team_name=html.escape(position.get("team_name") or "-"),
+        match_label=_match_label(position),
         dry_run_marker=_DRY_RUN_MARKER if position.get("dry_run", True) else "",
         ticker=html.escape(position.get("ticker", "")),
         contracts=contracts,
         entry=entry_price,
+        buy_time=html.escape(_to_second_precision(position.get("entry_time", ""))),
         exit=f"${exit_price_float:.2f}" if exit_price_float is not None else "-",
+        sell_time=html.escape(_to_second_precision(position.get("exit_time", ""))) if position.get("exit_time") else "-",
         return_cell=_return_cell(entry_price, exit_price_float, contracts),
         reason=html.escape(str(position.get("exit_reason", "-"))),
     )
@@ -361,9 +377,9 @@ def _decision_row(item: dict) -> str:
 _TRADE_ROW = (
     "<tr><td>{time}</td>"
     "<td><span class=\"badge {badge_class}\">{action_label}</span></td>"
-    "<td>{team_name}<br><span class=\"reason\">{event_ticker}</span></td>"
+    "<td class=\"col-text\">{team_name}<br><span class=\"reason\">{event_ticker}</span></td>"
     "<td>{ticker}</td><td>{contracts}</td><td>${price:.2f}</td>"
-    "<td class=\"reason\">{detail}</td><td>{mode}</td></tr>"
+    "<td class=\"reason col-text\">{detail}</td><td>{mode}</td></tr>"
 )
 
 _SELL_BADGE_CLASSES = {"take_profit": "sell-profit", "stop_loss": "sell-loss"}
@@ -477,9 +493,9 @@ def render_dashboard(
         stop_loss_percent=config.stop_loss_percent,
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
-        position_rows="".join(_open_position_row(p) for p in active_positions) or "<tr><td colspan=3>none open</td></tr>",
+        position_rows="".join(_open_position_row(p) for p in active_positions) or "<tr><td colspan=4>none open</td></tr>",
         closed_position_count=len(closed_positions),
-        closed_position_rows="".join(_closed_position_row(p) for p in closed_positions) or "<tr><td colspan=6>none yet</td></tr>",
+        closed_position_rows="".join(_closed_position_row(p) for p in closed_positions) or "<tr><td colspan=8>none yet</td></tr>",
         trade_count=len(trade_events),
         trade_truncated_note=trade_truncated_note,
         trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",

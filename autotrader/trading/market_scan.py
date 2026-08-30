@@ -47,6 +47,7 @@ class MarketScanResult:
             passes=True,
             side_ticker=self.side_ticker,
             side_team_name=self.side_team_name,
+            team_names=self.team_names,
             entry_price_dollars=self.entry_price_dollars,
             win_prob_percent=self.win_prob_percent,
             volume=self.volume,

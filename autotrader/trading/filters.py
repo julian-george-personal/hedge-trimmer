@@ -9,6 +9,7 @@ class FilterResult:
     passes: bool
     side_ticker: str | None = None
     side_team_name: str | None = None
+    team_names: list[str] | None = None
     entry_price_dollars: float | None = None
     win_prob_percent: float | None = None
     volume: float | None = None
@@ -80,6 +81,7 @@ def evaluate_candidate(kalshi_client: KalshiClient, candidate: dict, config: Tra
         passes=True,
         side_ticker=side_market["ticker"],
         side_team_name=side_market["team_name"],
+        team_names=[m["team_name"] for m in candidate["markets"]],
         entry_price_dollars=entry_price,
         win_prob_percent=win_prob_percent,
         volume=volume,
