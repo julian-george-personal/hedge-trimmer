@@ -16,15 +16,15 @@ _PAGE = """<!doctype html>
 <title>hedge trimmer - dashboard</title>
 <style>
   :root {{
-    --bg: #0f1115;
-    --panel: #161922;
-    --border: #262b38;
-    --text: #e6e9f0;
-    --text-dim: #8b93a7;
-    --accent: #4f8cff;
-    --yes: #3fbf7f;
-    --no: #e0555a;
-    --warn: #e0b13f;
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #dde1e8;
+    --text: #1b1f27;
+    --text-dim: #667085;
+    --accent: #2563eb;
+    --yes: #15803d;
+    --no: #dc2626;
+    --warn: #b45309;
   }}
   * {{ box-sizing: border-box; }}
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; background: var(--bg); color: var(--text); max-width: 1400px; margin: 0 auto; padding: 24px 16px 48px; }}
@@ -88,7 +88,7 @@ _PAGE = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>autotrader</h1>
+<h1>hedge trimmer</h1>
 
 <div class="narrow">
 <div id="saved-banner">{saved_banner}</div>
@@ -175,14 +175,14 @@ _PAGE = """<!doctype html>
 
 <h2>Open Positions</h2>
 <table>
-  <tr><th class="col-text">Match</th><th>Contracts</th><th>Entry</th><th>Bought</th></tr>
+  <tr><th class="col-text">Match</th><th>Bought</th><th>Contracts</th><th>Entry</th></tr>
   {position_rows}
 </table>
 
 <details class="log-section">
   <summary>Closed positions <span class="count">({closed_position_count})</span></summary>
   <table>
-    <tr><th class="col-text">Match</th><th>Contracts</th><th>Entry</th><th>Bought</th><th>Exit</th><th>Sold</th><th>Return</th><th>Reason</th></tr>
+    <tr><th class="col-text">Match</th><th>Bought / Sold</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Return</th><th>Reason</th></tr>
     {closed_position_rows}
   </table>
 </details>
@@ -242,14 +242,16 @@ _DRY_RUN_MARKER = '<span class="dry-run-marker" title="Dry run — no real order
 
 _OPEN_ROW = (
     "<tr><td class=\"col-text\">{match_label}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
+    "<td>{buy_time}</td>"
     "<td>{contracts}</td>"
-    "<td>${entry:.2f}</td><td>{buy_time}</td></tr>"
+    "<td>${entry:.2f}</td></tr>"
 )
 
 _CLOSED_ROW = (
     "<tr><td class=\"col-text\">{match_label}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
+    "<td>{buy_time}<br><span class=\"reason\">{sell_time}</span></td>"
     "<td>{contracts}</td>"
-    "<td>${entry:.2f}</td><td>{buy_time}</td><td>{exit}</td><td>{sell_time}</td>"
+    "<td>${entry:.2f}</td><td>{exit}</td>"
     "<td>{return_cell}</td><td>{reason}</td></tr>"
 )
 
@@ -495,7 +497,7 @@ def render_dashboard(
         lead_time_minutes=config.lead_time_minutes,
         position_rows="".join(_open_position_row(p) for p in active_positions) or "<tr><td colspan=4>none open</td></tr>",
         closed_position_count=len(closed_positions),
-        closed_position_rows="".join(_closed_position_row(p) for p in closed_positions) or "<tr><td colspan=8>none yet</td></tr>",
+        closed_position_rows="".join(_closed_position_row(p) for p in closed_positions) or "<tr><td colspan=7>none yet</td></tr>",
         trade_count=len(trade_events),
         trade_truncated_note=trade_truncated_note,
         trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",

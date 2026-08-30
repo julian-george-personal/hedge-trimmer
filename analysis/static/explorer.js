@@ -444,10 +444,10 @@ async function renderChart(event, matchStartPromise) {
   state.chart = LightweightCharts.createChart(chartEl, {
     width: chartEl.clientWidth,
     height: chartEl.clientHeight,
-    layout: { background: { color: "#161922" }, textColor: "#8b93a7" },
+    layout: { background: { color: "#ffffff" }, textColor: "#667085" },
     grid: {
-      vertLines: { color: "#262b38" },
-      horzLines: { color: "#262b38" },
+      vertLines: { color: "#dde1e8" },
+      horzLines: { color: "#dde1e8" },
     },
     rightPriceScale: {
       scaleMargins: { top: 0.1, bottom: 0.3 },
@@ -475,7 +475,7 @@ async function renderChart(event, matchStartPromise) {
   });
 
   const volumeSeries = state.chart.addHistogramSeries({
-    color: "#4f8cff",
+    color: "#2563eb",
     priceFormat: { type: "volume" },
     priceScaleId: "volume",
   });

@@ -485,7 +485,7 @@
   top: 0;
   bottom: 0;
   width: 0;
-  border-left: 1px dotted rgba(255, 255, 255, 0.8);
+  border-left: 1px dotted rgba(27, 31, 39, 0.45);
 }
 
 #match-start-label {
@@ -495,7 +495,7 @@
   font-size: 11px;
   font-weight: 500;
   color: var(--text);
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(27, 31, 39, 0.06);
   padding: 2px 6px;
   border-radius: 4px;
   white-space: nowrap;
