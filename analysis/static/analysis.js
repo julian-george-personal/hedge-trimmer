@@ -487,6 +487,29 @@ function rangePairsFromBreakpoints(breakpoints) {
   return pairs;
 }
 
+// 95%, two-sided — the conventional bar for "probably not noise". Fixed
+// rather than a widget input: nobody wants to hand-tune a confidence level
+// per run, and 95% is the standard default anyone reading "statistically
+// significant" without qualification would assume.
+const BAND_SIGNIFICANCE_Z = 1.96;
+
+// Margin of error (in dollars, at BAND_SIGNIFICANCE_Z confidence) on a
+// threshold's TOTAL profit, from the running sum and sum-of-squares of its
+// per-match profits (avoids keeping every profit value around just to
+// compute variance once at the end). A band's profit only counts as real
+// once it exceeds this — i.e. the confidence interval [value - margin,
+// value + margin] excludes zero — rather than any positive total, however
+// thin relative to its own noise (a $30 total over 104 matches is 29
+// cents/match, well within the swing you'd expect from chance alone).
+// Infinity for n<2: with one match there's no variance to estimate, so
+// nothing can be significant.
+function marginOfError(total, sumSq, n) {
+  if (n < 2) return Infinity;
+  const variance = Math.max(0, (sumSq - (total * total) / n) / (n - 1));
+  // SE of the total (not the mean) — Var(sum of n iid) = n * variance.
+  return BAND_SIGNIFICANCE_Z * Math.sqrt(variance * n);
+}
+
 // Sweeps take-profit thresholds (at OPTIMIZER_THRESHOLD_STEP resolution,
 // coarser than the EV-curve widgets' 1% since this runs inside a much
 // larger outer grid) for one fixed stats subset + stop-loss, returning the
@@ -494,20 +517,24 @@ function rangePairsFromBreakpoints(breakpoints) {
 // threshold's eligible count drops below minSampleSize rather than
 // scanning to EV_CURVE_MAX_THRESHOLD — isThresholdReachable's eligible set
 // only shrinks as the threshold rises (see spikeResult), so every higher
-// threshold would fail the floor too.
+// threshold would fail the floor too. Every point carries its margin of
+// error (see marginOfError) so callers can gate on statistical
+// significance, not just sign, without a second pass over the data.
 function bestDollarPoint(stats, side, stopLossPercent, betAmount, spread, feeSim, minSampleSize) {
   let best = null;
   for (let threshold = EV_CURVE_MIN_THRESHOLD; threshold <= EV_CURVE_MAX_THRESHOLD; threshold += OPTIMIZER_THRESHOLD_STEP) {
     let total = 0;
+    let sumSq = 0;
     let n = 0;
     for (const stat of stats) {
       const profit = simulateMatchProfit(stat, side, threshold, stopLossPercent, betAmount, spread, feeSim);
       if (profit === null) continue;
       total += profit;
+      sumSq += profit * profit;
       n++;
     }
     if (n < minSampleSize) break;
-    if (!best || total > best.value) best = { threshold, value: total, n };
+    if (!best || total > best.value) best = { threshold, value: total, n, marginOfError: marginOfError(total, sumSq, n) };
   }
   return best;
 }
@@ -621,14 +648,18 @@ function bestBandExit(stats, side, betAmount, minSampleSize, spread, feeSim) {
 // take-profit threshold, it fixes bandWidth-wide win-probability bands and
 // finds each band's own optimal (stop-loss, take-profit) — the resulting
 // policy reads "if the side's start probability falls in band B, use B's
-// exits; if B's best exit still loses money, don't bet that band at all".
-// minSampleSize is a per-band floor, not a floor on the total match count —
-// each band independently needs at least that many matches to be searched
-// at all (see the widget's "per band" label). The pre-match volume range
-// stays a single shared knob searched as before. A volume range's total is
-// the sum over its profitable bands, and the winning result keeps every
-// band (no-bet and under-sampled ones included) so the display can show
-// the complete policy.
+// exits; if B's best exit doesn't clear its own margin of error (see
+// marginOfError) at BAND_SIGNIFICANCE_Z confidence, don't bet that band at
+// all" — this is a single per-band test with no correction for the many
+// threshold/stop-loss/volume-range combinations the grid search tries, so
+// treat it as a noise filter, not a rigorous guarantee. minSampleSize is a
+// per-band floor, not a floor on the total match count — each band
+// independently needs at least that many matches to be searched at all
+// (see the widget's "per band" label). The pre-match volume range stays a
+// single shared knob searched as before. A volume range's total is the
+// sum over its profitable bands, and the winning result keeps every band
+// (no-bet and under-sampled ones included) so the display can show the
+// complete policy.
 async function runBandOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSim, onProgress, isCurrent, bandWidth = BAND_OPTIMIZER_BAND_WIDTH) {
   const bands = winProbBands(pairs, side, bandWidth);
   if (bands.length === 0) return null;
@@ -651,7 +682,10 @@ async function runBandOptimizer(pairs, side, betAmount, minSampleSize, spread, f
         .filter((p) => bandContains(band, p.stat[`${side}_start_price`] * 100))
         .map((p) => p.stat);
       const exit = stats.length >= minSampleSize ? bestBandExit(stats, side, betAmount, minSampleSize, spread, feeSim) : null;
-      const bet = exit !== null && exit.value > 0;
+      // value > marginOfError already implies value > 0 (marginOfError is
+      // never negative), so this alone covers both "unprofitable" and "too
+      // noisy to trust" rejections.
+      const bet = exit !== null && exit.value > exit.marginOfError;
       bandResults.push({ lo: band.lo, hi: band.hi, matches: stats.length, exit, bet });
       if (bet) {
         total += exit.value;
@@ -979,11 +1013,21 @@ function renderExitPolicyChart(svg, bands, side) {
   return { xScale, yScale, plot };
 }
 
+// Why a band with a found exit still isn't "bet": either its best exit
+// lost money outright, or it made money too thin/noisy relative to its
+// sample to clear its own 95% margin of error (see marginOfError) — e.g.
+// +$30 over 104 matches, ±$210, is well within the swing you'd expect from
+// chance alone.
+function bandSkipReason(exit) {
+  if (exit.value <= 0) return "unprofitable at best";
+  return `not significant (±${formatDollars(exit.marginOfError)})`;
+}
+
 function exitPolicyTooltipValue(band) {
   if (!band.exit) return `too few matches (n=${band.matches})`;
   const stop = band.exit.stopLoss > 0 ? `SL ≤${band.exit.stopLoss}%` : "no stop-loss";
   const outcome = `${band.exit.value >= 0 ? "+" : ""}${formatDollars(band.exit.value)} (n=${band.exit.n})`;
-  if (!band.bet) return `no bet — best exit ${outcome}`;
+  if (!band.bet) return `no bet, ${bandSkipReason(band.exit)} — best exit ${outcome}`;
   return `TP +${band.exit.threshold - EV_CURVE_MIN_THRESHOLD}%, ${stop} → ${outcome}`;
 }
 
@@ -1447,9 +1491,12 @@ const STOP_LOSS_DOLLAR_CONFIG = {
 // grows as new data lands, so a cache hit is never passed off as fresh:
 // it renders with a banner saying when it was computed and over how many
 // matches, plus a Recalculate button that redoes the search for real.
-// v2: band optimizer switched from quantile buckets to fixed 2.5% bands —
-// older cached results reflect the old bucketing, so they're ignored.
-const OPTIMIZER_CACHE_VERSION = 2;
+// v2: band optimizer switched from quantile buckets to fixed 2.5% bands.
+// v3: band optimizer's "bet" decision switched from any positive profit to
+// clearing a 95% margin of error (see marginOfError) — older cached
+// results may flag bands as profitable that this version would reject as
+// noise, so they're ignored.
+const OPTIMIZER_CACHE_VERSION = 3;
 
 function sidebarFiltersCacheable() {
   return (
@@ -1515,10 +1562,10 @@ const OPTIMIZER_CONFIG = {
 const BAND_OPTIMIZER_CONFIG = {
   id: "widget-optimizer-bands",
   title: "Optimal exit policy by win probability (max profit, by pre-match volume)",
-  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into fixed-width win-probability bands (width set below) and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. Bands whose best exit still loses money are skipped (“no bet”); pre-match volume stays a single shared range. Minimum sample size is a per-band floor, not a floor on the total match count — each band needs that many matches of its own to be searched at all, so narrower bands (or a stricter floor) leave more edge bands skipped for lack of data. Same grid-search caveats and spread/fee simulation as above.",
+  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into fixed-width win-probability bands (width set below) and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. A band is only counted as “bet” if its best exit clears its own 95% margin of error — e.g. +$30 over 104 matches is within the swing you'd expect from chance alone and gets skipped, even though it's technically positive; everything else is skipped (“no bet”). Pre-match volume stays a single shared range. Minimum sample size is a per-band floor, not a floor on the total match count — each band needs that many matches of its own to be searched at all, so narrower bands (or a stricter floor) leave more edge bands skipped for lack of data. Same grid-search caveats and spread/fee simulation as above.",
   run: runBandOptimizer,
   render: renderBandOptimizerResult,
-  bandWidth: true,
+  perBand: true,
 };
 
 // Unlike the EV-curve widgets above, this one doesn't recompute on every
@@ -1563,8 +1610,8 @@ function buildOptimizerWidget(config) {
 
   const els = {
     betAmount: buildBetAmountControl(markStale),
-    minSampleSize: buildMinSampleSizeControl(markStale, config.bandWidth ? "Minimum sample size (matches per band)" : undefined),
-    bandWidth: config.bandWidth ? buildBandWidthControl(markStale) : null,
+    minSampleSize: buildMinSampleSizeControl(markStale, config.perBand ? "Minimum sample size (matches per band)" : undefined),
+    bandWidth: config.perBand ? buildBandWidthControl(markStale) : null,
     spread: buildSpreadControl(markStale),
     feeSim: buildFeeSimControl(markStale),
   };
@@ -1704,9 +1751,9 @@ function bandTableRow(band) {
   const stopLoss = band.exit.stopLoss === 0 ? "Off" : `≤ ${band.exit.stopLoss}% of entry`;
   const profit = `${band.exit.value >= 0 ? "+" : ""}${formatDollars(band.exit.value)}`;
   if (!band.bet) {
-    return `<tr class="band-no-bet"><td>${range}</td><td>${takeProfit}</td><td>${stopLoss}</td><td>no bet (${profit} at best)</td><td>${band.exit.n}</td></tr>`;
+    return `<tr class="band-no-bet"><td>${range}</td><td>${takeProfit}</td><td>${stopLoss}</td><td>no bet — ${bandSkipReason(band.exit)} (${profit} at best)</td><td>${band.exit.n}</td></tr>`;
   }
-  return `<tr><td>${range}</td><td>${takeProfit}</td><td>${stopLoss}</td><td class="positive">${profit}</td><td>${band.exit.n}</td></tr>`;
+  return `<tr><td>${range}</td><td>${takeProfit}</td><td>${stopLoss}</td><td class="positive">${profit} ± ${formatDollars(band.exit.marginOfError)}</td><td>${band.exit.n}</td></tr>`;
 }
 
 // Renders runBandOptimizer's winning policy (or an explanatory empty
