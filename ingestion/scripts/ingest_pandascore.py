@@ -21,19 +21,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-root", default=DEFAULT_PANDASCORE_DATA_ROOT, help="Local path or s3:// URI for Parquet output"
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace matches.parquet with exactly this run's results instead of merging into what's "
+        "already there (default: merge, so a narrow date range doesn't delete out-of-range history)",
+    )
     return parser.parse_args()
+
+
+def run(
+    client: PandaScoreClient,
+    start_date: datetime,
+    end_date: datetime,
+    data_root: str = DEFAULT_PANDASCORE_DATA_ROOT,
+    overwrite: bool = False,
+) -> None:
+    to_time = end_date + timedelta(days=1)
+    matches = fetch_cs2_matches(client, start_date, to_time)
+    print(f"found {len(matches)} CS2 matches beginning between {start_date.date()} and {end_date.date()}")
+    write_pandascore_matches(matches, data_root, overwrite=overwrite)
 
 
 def main() -> None:
     args = parse_args()
     client = PandaScoreClient.from_credentials_dir()
-
-    from_time = parse_date_arg(args.start_date)
-    to_time = parse_date_arg(args.end_date) + timedelta(days=1)
-
-    matches = fetch_cs2_matches(client, from_time, to_time)
-    print(f"found {len(matches)} CS2 matches beginning between {args.start_date} and {args.end_date}")
-    write_pandascore_matches(matches, args.data_root)
+    run(
+        client,
+        parse_date_arg(args.start_date),
+        parse_date_arg(args.end_date),
+        args.data_root,
+        overwrite=args.overwrite,
+    )
 
 
 if __name__ == "__main__":
