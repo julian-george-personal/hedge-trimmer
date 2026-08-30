@@ -292,7 +292,7 @@ def _closed_position_row(position: dict) -> str:
     entry_price = float(position.get("entry_price_dollars", 0))
     exit_price = position.get("exit_price_dollars")
     exit_price_float = float(exit_price) if exit_price is not None else None
-    contracts = position.get("contracts", 0)
+    contracts = int(position.get("contracts", 0))
     return _CLOSED_ROW.format(
         team_name=html.escape(position.get("team_name") or "-"),
         dry_run_marker=_DRY_RUN_MARKER if position.get("dry_run", True) else "",
