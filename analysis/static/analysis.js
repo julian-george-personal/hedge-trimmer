@@ -534,12 +534,118 @@ async function runOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSi
   return best;
 }
 
+// --- Band optimizer (per-win-probability exit policy) -----------------
+//
+// The plain optimizer above finds one global take-profit threshold, but the
+// optimal exit depends on where the side started: a contract can't trade
+// above $1, so a side entered at 45% has at most ~+120% of headroom while a
+// 20% side has ~+400%. Sweeping one static threshold across all matches
+// silently turns high thresholds into "hold to expiry" for every
+// high-probability side. This variant partitions matches into
+// win-probability bands and finds each band's own optimal exit instead.
+const BAND_OPTIMIZER_WINPROB_BUCKETS = 6;
+
+// Contiguous win-probability bands partitioning `pairs` for the band
+// optimizer — quantile-edged (see quantileBreakpoints) so each band starts
+// with roughly equal sample. Bands are [lo, hi), except the last, which
+// includes its upper edge so the max-probability match still lands in a band.
+function winProbBands(pairs, side) {
+  const edges = quantileBreakpoints(pairs.map((p) => p.stat[`${side}_start_price`] * 100), BAND_OPTIMIZER_WINPROB_BUCKETS);
+  const bands = [];
+  for (let i = 0; i + 1 < edges.length; i++) {
+    bands.push({ lo: edges[i], hi: edges[i + 1], last: i + 2 === edges.length });
+  }
+  return bands;
+}
+
+function bandContains(band, winProb) {
+  return winProb >= band.lo && (winProb < band.hi || (band.last && winProb <= band.hi));
+}
+
+// Best (stop-loss, take-profit) exit for one band's matches — the inner
+// search runBandOptimizer repeats for every band x volume range. Returns
+// { stopLoss, threshold, value, n } or null if no combination meets the
+// sample floor.
+function bestBandExit(stats, side, betAmount, minSampleSize, spread, feeSim) {
+  let best = null;
+  for (let stopLoss = 0; stopLoss <= 100; stopLoss += OPTIMIZER_STOPLOSS_STEP) {
+    const point = bestDollarPoint(stats, side, stopLoss, betAmount, spread, feeSim, minSampleSize);
+    if (point && (!best || point.value > best.value)) best = { stopLoss, ...point };
+  }
+  return best;
+}
+
+// Like runOptimizer, but instead of one global win-probability range and
+// take-profit threshold, it fixes quantile win-probability bands and finds
+// each band's own optimal (stop-loss, take-profit) — the resulting policy
+// reads "if the side's start probability falls in band B, use B's exits;
+// if B's best exit still loses money, don't bet that band at all". The
+// pre-match volume range stays a single shared knob searched as before. A
+// volume range's total is the sum over its profitable bands, and the
+// winning result keeps every band (no-bet and under-sampled ones included)
+// so the display can show the complete policy.
+async function runBandOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSim, onProgress, isCurrent) {
+  const bands = winProbBands(pairs, side);
+  if (bands.length === 0) return null;
+  const volumeBreakpoints = quantileBreakpoints(pairs.map((p) => p.stat.volume_before_start), OPTIMIZER_VOLUME_BUCKETS);
+  const volumeRanges = rangePairsFromBreakpoints(volumeBreakpoints);
+
+  let best = null;
+  let done = 0;
+  const totalCombos = volumeRanges.length * bands.length;
+  let chunkStart = performance.now();
+
+  for (const [minVolume, maxVolume] of volumeRanges) {
+    const byVolume = pairs.filter((p) => p.stat.volume_before_start >= minVolume && p.stat.volume_before_start <= maxVolume);
+    const bandResults = [];
+    let total = 0;
+    let n = 0;
+
+    for (const band of bands) {
+      const stats = byVolume
+        .filter((p) => bandContains(band, p.stat[`${side}_start_price`] * 100))
+        .map((p) => p.stat);
+      const exit = stats.length >= minSampleSize ? bestBandExit(stats, side, betAmount, minSampleSize, spread, feeSim) : null;
+      const bet = exit !== null && exit.value > 0;
+      bandResults.push({ lo: band.lo, hi: band.hi, matches: stats.length, exit, bet });
+      if (bet) {
+        total += exit.value;
+        n += exit.n;
+      }
+      done++;
+
+      if (performance.now() - chunkStart > OPTIMIZER_YIELD_MS) {
+        onProgress(done / totalCombos);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (!isCurrent()) return null;
+        chunkStart = performance.now();
+      }
+    }
+
+    if (bandResults.some((band) => band.bet) && (!best || total > best.value)) {
+      best = { minVolume, maxVolume, bands: bandResults, value: total, n };
+    }
+  }
+  onProgress(1);
+  return best;
+}
+
 function linearScale(domain, range) {
   const [d0, d1] = domain;
   const [r0, r1] = range;
   const span = d1 - d0 || 1;
   const scale = (value) => r0 + ((value - d0) / span) * (r1 - r0);
   scale.invert = (value) => d0 + ((value - r0) / (r1 - r0 || 1)) * span;
+  return scale;
+}
+
+// linearScale in log10 space — the exit-policy chart's y axis spans
+// stop-losses near 10% of entry and take-profits near 1000%, which a linear
+// axis would squash into an unreadable sliver at the bottom.
+function logScale(domain, range) {
+  const inner = linearScale(domain.map(Math.log10), range);
+  const scale = (value) => inner(Math.log10(value));
+  scale.invert = (value) => Math.pow(10, inner.invert(value));
   return scale;
 }
 
@@ -679,6 +785,184 @@ function attachEvChartHover(widget, svg, points, scales, color, tooltip, formatT
     const wrapRect = widget.querySelector(".chart-wrap").getBoundingClientRect();
     tooltip.style.left = `${svgRect.left - wrapRect.left + (x / CHART_VIEW_WIDTH) * svgRect.width}px`;
     tooltip.style.top = `${svgRect.top - wrapRect.top + (y / CHART_VIEW_HEIGHT) * svgRect.height}px`;
+  });
+  overlay.addEventListener("pointerleave", hide);
+}
+
+const EXIT_POLICY_Y_TICKS = [10, 20, 50, 100, 200, 500, 1000, 2000];
+
+function formatWinProbBand(lo, hi) {
+  const [a, b] = lo.toFixed(0) === hi.toFixed(0) ? [lo.toFixed(1), hi.toFixed(1)] : [lo.toFixed(0), hi.toFixed(0)];
+  return `${a}–${b}%`;
+}
+
+// x positions for one band's marks, inset 1px per side so adjacent bands
+// keep a visible gap instead of fusing into one block.
+function bandXBounds(band, xScale) {
+  return { x1: xScale(band.lo) + 1, x2: xScale(band.hi) - 1 };
+}
+
+// Draws one profitable band's exit policy: a solid take-profit line, a
+// dashed stop-loss line (when one is set), and a shaded "hold corridor"
+// between them — from the take-profit down to the stop-loss, or to the
+// bottom of the plot when there's no stop-loss (an unstopped position rides
+// all the way down).
+function drawBandCorridor(svg, band, xScale, yScale, plotBottom, color) {
+  const { x1, x2 } = bandXBounds(band, xScale);
+  const mid = (x1 + x2) / 2;
+  const yTp = yScale(band.exit.threshold);
+  const hasStop = band.exit.stopLoss > 0;
+  const yBottom = hasStop ? yScale(band.exit.stopLoss) : plotBottom;
+
+  svg.appendChild(svgEl("rect", { x: x1, y: yTp, width: x2 - x1, height: yBottom - yTp, fill: color, opacity: 0.12 }));
+  svg.appendChild(svgEl("line", { x1, x2, y1: yTp, y2: yTp, stroke: color, "stroke-width": 2.5 }));
+  const tpLabel = svgEl("text", { x: mid, y: yTp - 6, class: "chart-band-label", "text-anchor": "middle" });
+  tpLabel.textContent = `+${band.exit.threshold - EV_CURVE_MIN_THRESHOLD}%`;
+  svg.appendChild(tpLabel);
+
+  if (hasStop) {
+    svg.appendChild(svgEl("line", { x1, x2, y1: yBottom, y2: yBottom, stroke: color, "stroke-width": 2, "stroke-dasharray": "5 4" }));
+    const slLabel = svgEl("text", { x: mid, y: yBottom + 13, class: "chart-band-sublabel", "text-anchor": "middle" });
+    slLabel.textContent = `≤${band.exit.stopLoss}%`;
+    svg.appendChild(slLabel);
+  }
+}
+
+// Draws a skipped band (unprofitable at its best, or under the sample
+// floor) as a muted full-height tint with a one-word explanation at the
+// entry line.
+function drawBandSkip(svg, band, xScale, yEntry, plot) {
+  const { x1, x2 } = bandXBounds(band, xScale);
+  svg.appendChild(svgEl("rect", { x: x1, y: plot.top, width: x2 - x1, height: plot.bottom - plot.top, class: "chart-band-skip" }));
+  const label = svgEl("text", { x: (x1 + x2) / 2, y: yEntry - 6, class: "chart-band-sublabel", "text-anchor": "middle" });
+  label.textContent = band.exit ? "no bet" : `n=${band.matches}`;
+  svg.appendChild(label);
+}
+
+// The hard ceiling on any sell price: a contract can't trade above $1, so a
+// side entered at p% can never sell above (100/p)x its entry — which is why
+// the optimal take-profit has to fall as win probability rises. Drawn as a
+// dashed reference curve, clipped to the plot's y range, with a legend-style
+// key in the top-right corner (the curve only nears the top at the left
+// edge, so that corner is reliably empty).
+function drawPriceCeilingCurve(svg, xDomain, xScale, yScale, yMax, plot) {
+  const samples = [];
+  for (let p = xDomain[0]; p <= xDomain[1]; p += 0.5) {
+    const ceiling = 10000 / p;
+    if (ceiling <= yMax) samples.push(`${xScale(p)},${yScale(ceiling)}`);
+  }
+  if (samples.length < 2) return;
+  svg.appendChild(svgEl("polyline", { points: samples.join(" "), class: "chart-ceiling-line" }));
+
+  const keyY = plot.top + 8;
+  const label = svgEl("text", { x: plot.right - 4, y: keyY, class: "chart-band-sublabel", "text-anchor": "end", "dominant-baseline": "middle" });
+  label.textContent = "price ceiling ($1)";
+  svg.appendChild(label);
+  const labelStart = plot.right - 4 - label.getComputedTextLength();
+  svg.appendChild(svgEl("line", { x1: labelStart - 26, x2: labelStart - 8, y1: keyY, y2: keyY, class: "chart-ceiling-line" }));
+}
+
+// The band optimizer's result chart: win probability at match start on x,
+// sell trigger as a % of entry price on log-scale y (100% = entry, marked
+// with the darker gridline). Each profitable band gets a hold corridor
+// (see drawBandCorridor); skipped bands get a muted tint; the dashed curve
+// is the $1 price ceiling explaining the downward-stepping take-profits.
+function renderExitPolicyChart(svg, bands, side) {
+  svg.innerHTML = "";
+  const plot = chartPlotArea();
+  const color = SIDE_COLORS[side];
+
+  const xDomain = [bands[0].lo, bands[bands.length - 1].hi];
+  const tpLevels = bands.filter((band) => band.bet).map((band) => band.exit.threshold);
+  const slLevels = bands.filter((band) => band.bet && band.exit.stopLoss > 0).map((band) => band.exit.stopLoss);
+  const yMax = Math.max(...tpLevels, 150) * 1.6;
+  const yMin = Math.min(60, ...slLevels.map((level) => level * 0.6));
+  const xScale = linearScale(xDomain, [plot.left, plot.right]);
+  const yScale = logScale([yMin, yMax], [plot.bottom, plot.top]);
+
+  const grid = svgEl("g", { class: "chart-grid" });
+  for (const tick of EXIT_POLICY_Y_TICKS) {
+    if (tick < yMin || tick > yMax) continue;
+    const y = yScale(tick);
+    grid.appendChild(svgEl("line", { x1: plot.left, x2: plot.right, y1: y, y2: y, class: tick === 100 ? "chart-zero-line" : "chart-gridline" }));
+    const label = svgEl("text", { x: plot.left - 8, y, class: "chart-axis-label", "text-anchor": "end", "dominant-baseline": "middle" });
+    label.textContent = `${tick}%`;
+    grid.appendChild(label);
+  }
+  let lastTickX = -Infinity;
+  for (const edge of [...bands.map((band) => band.lo), bands[bands.length - 1].hi]) {
+    const x = xScale(edge);
+    if (x - lastTickX < 30) continue;
+    lastTickX = x;
+    const label = svgEl("text", { x, y: plot.bottom + 20, class: "chart-axis-label", "text-anchor": "middle" });
+    label.textContent = `${Math.round(edge)}%`;
+    grid.appendChild(label);
+  }
+  svg.appendChild(grid);
+
+  drawPriceCeilingCurve(svg, xDomain, xScale, yScale, yMax, plot);
+  const yEntry = yScale(100);
+  for (const band of bands) {
+    if (band.bet) drawBandCorridor(svg, band, xScale, yScale, plot.bottom, color);
+    else drawBandSkip(svg, band, xScale, yEntry, plot);
+  }
+
+  return { xScale, yScale, plot };
+}
+
+function exitPolicyTooltipValue(band) {
+  if (!band.exit) return `too few matches (n=${band.matches})`;
+  const stop = band.exit.stopLoss > 0 ? `SL ≤${band.exit.stopLoss}%` : "no stop-loss";
+  const outcome = `${band.exit.value >= 0 ? "+" : ""}${formatDollars(band.exit.value)} (n=${band.exit.n})`;
+  if (!band.bet) return `no bet — best exit ${outcome}`;
+  return `TP +${band.exit.threshold - EV_CURVE_MIN_THRESHOLD}%, ${stop} → ${outcome}`;
+}
+
+// Hover layer for the exit-policy chart: outlines the band under the
+// pointer and shows its full decision in a tooltip. Bands are wide slabs
+// rather than points, so this highlights the whole band instead of
+// snapping a crosshair the way attachEvChartHover does.
+function attachExitPolicyHover(wrap, svg, bands, scales) {
+  const { xScale, plot } = scales;
+  const tooltip = wrap.querySelector(".chart-tooltip");
+  const outline = svgEl("rect", { y: plot.top, height: plot.bottom - plot.top, class: "chart-band-outline" });
+  const overlay = svgEl("rect", { x: plot.left, y: plot.top, width: plot.right - plot.left, height: plot.bottom - plot.top, class: "chart-overlay" });
+  svg.appendChild(outline);
+  svg.appendChild(overlay);
+
+  const hide = () => {
+    outline.classList.remove("visible");
+    tooltip.hidden = true;
+  };
+
+  overlay.addEventListener("pointermove", (event) => {
+    const svgRect = svg.getBoundingClientRect();
+    const mouseXInView = ((event.clientX - svgRect.left) / svgRect.width) * CHART_VIEW_WIDTH;
+    const winProb = xScale.invert(mouseXInView);
+    const band = bands.find((candidate) => winProb >= candidate.lo && winProb <= candidate.hi);
+    if (!band) {
+      hide();
+      return;
+    }
+
+    const { x1, x2 } = bandXBounds(band, xScale);
+    outline.setAttribute("x", x1);
+    outline.setAttribute("width", x2 - x1);
+    outline.classList.add("visible");
+
+    tooltip.hidden = false;
+    tooltip.innerHTML = "";
+    const line1 = document.createElement("div");
+    line1.textContent = `Win prob ${formatWinProbBand(band.lo, band.hi)} at start`;
+    const line2 = document.createElement("div");
+    line2.className = "chart-tooltip-value";
+    line2.textContent = exitPolicyTooltipValue(band);
+    tooltip.append(line1, line2);
+
+    const wrapRect = wrap.getBoundingClientRect();
+    const mid = (x1 + x2) / 2;
+    tooltip.style.left = `${svgRect.left - wrapRect.left + (mid / CHART_VIEW_WIDTH) * svgRect.width}px`;
+    tooltip.style.top = `${svgRect.top - wrapRect.top + (plot.top / CHART_VIEW_HEIGHT) * svgRect.height + 24}px`;
   });
   overlay.addEventListener("pointerleave", hide);
 }
@@ -1007,19 +1291,39 @@ const DOLLAR_PROFIT_CONFIG = {
   formatTooltipValue: formatDollarsTooltipValue,
 };
 
+// config: { id, title, note, run, render } — run is the async grid search
+// (runOptimizer's signature) and render draws its winning result
+// (renderOptimizerResult's signature), so the single-threshold optimizer
+// and the per-band exit-policy optimizer share one widget shell.
+const OPTIMIZER_CONFIG = {
+  id: "widget-optimizer",
+  title: "Optimal filter combination (max profit, by pre-match volume)",
+  note: "Grid search over pre-match volume, win probability, stop-loss, and take-profit thresholds for the combination with the highest total profit — a coarse approximation snapped to quantiles of the actual data, not a guaranteed global optimum. Uses the same realistic spread/fee simulation as the dollar-profit widget above.",
+  run: runOptimizer,
+  render: renderOptimizerResult,
+};
+
+const BAND_OPTIMIZER_CONFIG = {
+  id: "widget-optimizer-bands",
+  title: "Optimal exit policy by win probability (max profit, by pre-match volume)",
+  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into win-probability bands (quantile-edged) and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. Bands whose best exit still loses money are skipped (“no bet”); pre-match volume stays a single shared range; the minimum sample size applies per band. Same grid-search caveats and spread/fee simulation as above.",
+  run: runBandOptimizer,
+  render: renderBandOptimizerResult,
+};
+
 // Unlike the EV-curve widgets above, this one doesn't recompute on every
 // filter tweak (renderAll/evCurveWidgetUpdaters) — a run costs a bounded
-// but still noticeable grid search (see runOptimizer), so it only runs
+// but still noticeable grid search (see config.run), so it only runs
 // when the button is clicked, and other controls just mark the last result
 // stale rather than kicking off a new search themselves.
-function buildOptimizerWidget() {
+function buildOptimizerWidget(config) {
   const widget = document.createElement("div");
   widget.className = "widget widget-wide";
-  widget.id = "widget-optimizer";
+  widget.id = config.id;
   widget.innerHTML = `
     <div class="widget-header">
       <span class="widget-drag-handle" draggable="true" title="Drag to reorder">⠿</span>
-      <h2>Optimal filter combination (max profit, by pre-match volume)</h2>
+      <h2>${config.title}</h2>
     </div>
     <div class="side-toggle" role="group" aria-label="Side">
       <button type="button" data-side="underdog" class="active">Underdog</button>
@@ -1034,7 +1338,7 @@ function buildOptimizerWidget() {
       </div>
     </div>
     <div class="optimizer-result" hidden></div>
-    <p class="optimizer-note">Grid search over pre-match volume, win probability, stop-loss, and take-profit thresholds for the combination with the highest total profit — a coarse approximation snapped to quantiles of the actual data, not a guaranteed global optimum. Uses the same realistic spread/fee simulation as the dollar-profit widget above.</p>
+    <p class="optimizer-note">${config.note}</p>
   `;
 
   const local = { side: "underdog", runToken: 0 };
@@ -1084,7 +1388,7 @@ function buildOptimizerWidget() {
     progressFill.style.width = "0%";
     progressLabel.textContent = "0%";
 
-    const best = await runOptimizer(
+    const best = await config.run(
       pairs,
       local.side,
       betAmount,
@@ -1102,10 +1406,19 @@ function buildOptimizerWidget() {
 
     progressEl.hidden = true;
     runButton.disabled = false;
-    renderOptimizerResult(resultEl, best, local.side, betAmount, minSampleSize, spread, feeSim, pairs.length);
+    config.render(resultEl, best, local.side, betAmount, minSampleSize, spread, feeSim, pairs.length);
   });
 
   return widget;
+}
+
+// " (realistic spread, Kalshi fees)"-style suffix for the optimizer
+// headlines, naming whichever simulation options were on for the run.
+function simulationNotesSuffix(spread, feeSim) {
+  const notes = [];
+  if (spread) notes.push("realistic spread");
+  if (feeSim !== "none") notes.push(`${FEE_SIM_LABELS[feeSim]} fees`);
+  return notes.length ? ` (${notes.join(", ")})` : "";
 }
 
 // Renders runOptimizer's winning combination (or an explanatory empty
@@ -1119,10 +1432,7 @@ function renderOptimizerResult(resultEl, best, side, betAmount, minSampleSize, s
     return;
   }
 
-  const notes = [];
-  if (spread) notes.push("realistic spread");
-  if (feeSim !== "none") notes.push(`${FEE_SIM_LABELS[feeSim]} fees`);
-  const suffix = notes.length ? ` (${notes.join(", ")})` : "";
+  const suffix = simulationNotesSuffix(spread, feeSim);
 
   const item = (label, value) => `
     <div class="optimizer-result-item">
@@ -1143,6 +1453,57 @@ function renderOptimizerResult(resultEl, best, side, betAmount, minSampleSize, s
       ${item("Take-profit (max price)", `+${best.threshold - EV_CURVE_MIN_THRESHOLD}%`)}
     </div>
   `;
+}
+
+// One row of the band optimizer's policy table — dims bands the policy
+// skips and says why (unprofitable at their best, or under the sample
+// floor) instead of hiding them.
+function bandTableRow(band) {
+  const range = formatWinProbBand(band.lo, band.hi);
+  if (!band.exit) {
+    return `<tr class="band-no-bet"><td>${range}</td><td>—</td><td>—</td><td>too few matches</td><td>${band.matches}</td></tr>`;
+  }
+  const takeProfit = `+${band.exit.threshold - EV_CURVE_MIN_THRESHOLD}%`;
+  const stopLoss = band.exit.stopLoss === 0 ? "Off" : `≤ ${band.exit.stopLoss}% of entry`;
+  const profit = `${band.exit.value >= 0 ? "+" : ""}${formatDollars(band.exit.value)}`;
+  if (!band.bet) {
+    return `<tr class="band-no-bet"><td>${range}</td><td>${takeProfit}</td><td>${stopLoss}</td><td>no bet (${profit} at best)</td><td>${band.exit.n}</td></tr>`;
+  }
+  return `<tr><td>${range}</td><td>${takeProfit}</td><td>${stopLoss}</td><td class="positive">${profit}</td><td>${band.exit.n}</td></tr>`;
+}
+
+// Renders runBandOptimizer's winning policy (or an explanatory empty
+// state): headline total, the exit-policy corridor chart, and a per-band
+// table with the exact levels.
+function renderBandOptimizerResult(resultEl, best, side, betAmount, minSampleSize, spread, feeSim, totalMatches) {
+  resultEl.hidden = false;
+  resultEl.classList.remove("optimizer-result-stale");
+
+  if (!best) {
+    resultEl.innerHTML = `<div class="optimizer-result-empty">No win-probability band reached a profitable exit at a sample size of ${minSampleSize} match${minSampleSize === 1 ? "" : "es"} per band (of ${totalMatches} matches in the current sidebar filters).</div>`;
+    return;
+  }
+
+  resultEl.innerHTML = `
+    <div class="optimizer-result-headline">
+      <div class="result-label">Best total profit betting $${betAmount}/match, ${side}${simulationNotesSuffix(spread, feeSim)}</div>
+      <div class="result-value ${best.value >= 0 ? "positive" : "negative"}">${best.value >= 0 ? "+" : ""}${formatDollars(best.value)}</div>
+      <div class="result-detail">Pre-match volume ${formatVolume(best.minVolume)} – ${formatVolume(best.maxVolume)} · n=${best.n} matches in bet bands, of ${totalMatches} in the current sidebar filters</div>
+    </div>
+    <div class="result-label band-chart-caption">Sell trigger (% of entry price) by win probability at match start</div>
+    <div class="chart-wrap">
+      <svg class="ev-chart" viewBox="0 0 ${CHART_VIEW_WIDTH} ${CHART_VIEW_HEIGHT}"></svg>
+      <div class="chart-tooltip" hidden></div>
+    </div>
+    <table class="band-table">
+      <thead><tr><th>Win prob at start</th><th>Take-profit</th><th>Stop-loss</th><th>Profit</th><th>n</th></tr></thead>
+      <tbody>${best.bands.map(bandTableRow).join("")}</tbody>
+    </table>
+  `;
+
+  const svg = resultEl.querySelector(".ev-chart");
+  const scales = renderExitPolicyChart(svg, best.bands, side);
+  attachExitPolicyHover(resultEl.querySelector(".chart-wrap"), svg, best.bands, scales);
 }
 
 function buildPriceSpikeWidget() {
@@ -1301,7 +1662,8 @@ async function init() {
   widgets.appendChild(buildEvCurveWidget(TOTAL_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(PRE_MATCH_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(DOLLAR_PROFIT_CONFIG));
-  widgets.appendChild(buildOptimizerWidget());
+  widgets.appendChild(buildOptimizerWidget(OPTIMIZER_CONFIG));
+  widgets.appendChild(buildOptimizerWidget(BAND_OPTIMIZER_CONFIG));
   applyWidgetOrder(widgets, loadWidgetOrder());
   setupWidgetDragAndDrop(widgets);
   setupFilters();

@@ -619,3 +619,71 @@
   font-size: 11px;
   line-height: 1.5;
 }
+
+.band-chart-caption {
+  margin-top: 18px;
+}
+
+.chart-band-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.chart-band-sublabel {
+  font-size: 10.5px;
+  fill: var(--text-dim);
+}
+
+.chart-band-skip {
+  fill: var(--text-dim);
+  opacity: 0.07;
+}
+
+.chart-ceiling-line {
+  fill: none;
+  stroke: var(--text-dim);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  opacity: 0.7;
+}
+
+.chart-band-outline {
+  fill: none;
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  visibility: hidden;
+}
+
+.chart-band-outline.visible {
+  visibility: visible;
+}
+
+.band-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 4px;
+  font-size: 12.5px;
+}
+
+.band-table th {
+  text-align: left;
+  padding: 6px 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+
+.band-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.band-table td.positive {
+  color: var(--yes);
+}
+
+.band-table tr.band-no-bet td {
+  color: var(--text-dim);
+}
