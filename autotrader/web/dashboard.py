@@ -169,9 +169,9 @@ _PAGE = """<!doctype html>
   <div class="save"><button type="submit">Apply filters</button></div>
 </form>
 
-<h2>Positions</h2>
+<h2>Open Positions</h2>
 <table>
-  <tr><th>Match</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Return</th><th>Reason</th></tr>
+  <tr><th>Match</th><th>Contracts</th><th>Entry</th></tr>
   {position_rows}
 </table>
 
@@ -236,10 +236,16 @@ function autotraderOnArmedToggle(checkbox) {{
 
 _DRY_RUN_MARKER = '<span class="dry-run-marker" title="Dry run — no real order was placed">*</span>'
 
-_ROW = (
+_OPEN_ROW = (
     "<tr><td>{team_name}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
     "<td>{contracts}</td>"
-    "<td>${entry:.2f}</td><td>{exit}</td><td>{return_percent}</td><td>{reason}</td></tr>"
+    "<td>${entry:.2f}</td></tr>"
+)
+
+_CLOSED_ROW = (
+    "<tr><td>{team_name}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
+    "<td>{contracts}</td>"
+    "<td>${entry:.2f}</td><td>{exit}</td><td>{return_cell}</td><td>{reason}</td></tr>"
 )
 
 _STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>'
@@ -259,26 +265,42 @@ _DECISION_ROW = (
 )
 
 
-def _return_percent(entry_price: float, exit_price: float | None) -> str:
+def _return_cell(entry_price: float, exit_price: float | None, contracts: int) -> str:
     if exit_price is None or not entry_price:
         return "-"
+    dollars = (exit_price - entry_price) * contracts
     percent = (exit_price - entry_price) / entry_price * 100
-    css_class = "return-pos" if percent >= 0 else "return-neg"
-    return f'<span class="{css_class}">{percent:+.0f}%</span>'
+    css_class = "return-pos" if dollars >= 0 else "return-neg"
+    sign = "+" if dollars >= 0 else "-"
+    return (
+        f'<span class="{css_class}">{sign}${abs(dollars):.2f}</span>'
+        f'<br><span class="reason">{percent:+.0f}%</span>'
+    )
 
 
-def _position_row(position: dict) -> str:
-    entry_price = float(position.get("entry_price_dollars", 0))
-    exit_price = position.get("exit_price_dollars")
-    exit_price_float = float(exit_price) if exit_price is not None else None
-    return _ROW.format(
+def _open_position_row(position: dict) -> str:
+    return _OPEN_ROW.format(
         team_name=html.escape(position.get("team_name") or "-"),
         dry_run_marker=_DRY_RUN_MARKER if position.get("dry_run", True) else "",
         ticker=html.escape(position.get("ticker", "")),
-        contracts=position.get("contracts", ""),
+        contracts=position.get("contracts", 0),
+        entry=float(position.get("entry_price_dollars", 0)),
+    )
+
+
+def _closed_position_row(position: dict) -> str:
+    entry_price = float(position.get("entry_price_dollars", 0))
+    exit_price = position.get("exit_price_dollars")
+    exit_price_float = float(exit_price) if exit_price is not None else None
+    contracts = position.get("contracts", 0)
+    return _CLOSED_ROW.format(
+        team_name=html.escape(position.get("team_name") or "-"),
+        dry_run_marker=_DRY_RUN_MARKER if position.get("dry_run", True) else "",
+        ticker=html.escape(position.get("ticker", "")),
+        contracts=contracts,
         entry=entry_price,
         exit=f"${exit_price_float:.2f}" if exit_price_float is not None else "-",
-        return_percent=_return_percent(entry_price, exit_price_float),
+        return_cell=_return_cell(entry_price, exit_price_float, contracts),
         reason=html.escape(str(position.get("exit_reason", "-"))),
     )
 
@@ -455,9 +477,9 @@ def render_dashboard(
         stop_loss_percent=config.stop_loss_percent,
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
-        position_rows="".join(_position_row(p) for p in active_positions) or "<tr><td colspan=6>none open</td></tr>",
+        position_rows="".join(_open_position_row(p) for p in active_positions) or "<tr><td colspan=3>none open</td></tr>",
         closed_position_count=len(closed_positions),
-        closed_position_rows="".join(_position_row(p) for p in closed_positions) or "<tr><td colspan=6>none yet</td></tr>",
+        closed_position_rows="".join(_closed_position_row(p) for p in closed_positions) or "<tr><td colspan=6>none yet</td></tr>",
         trade_count=len(trade_events),
         trade_truncated_note=trade_truncated_note,
         trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",
