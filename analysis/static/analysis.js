@@ -347,16 +347,21 @@ function simulatedFee(feeSim, contracts, price) {
 // `${side}_bid_*` fields built in price_spike.py. feeSim, independent of
 // spread, picks which venue's per-leg fee formula (see simulatedFee) to
 // subtract — "none" applies no fees.
+//
+// thresholdPercent may be null, meaning no take-profit at all: the position
+// only exits via the stop-loss or settlement, and no match is excluded for
+// unreachability (there is no target to reach).
 function simulateMatchProfit(stat, side, thresholdPercent, stopLossPercent, betAmount, spread = false, feeSim = "none") {
   const startPrice = spread ? stat[`${side}_entry_ask`] : stat[`${side}_start_price`];
   if (startPrice == null) return null;
+  const hasTakeProfit = thresholdPercent != null;
   const thresholdFactor = thresholdPercent / 100;
-  if (!isThresholdReachable(startPrice, thresholdFactor)) return null;
+  if (hasTakeProfit && !isThresholdReachable(startPrice, thresholdFactor)) return null;
   const thresholdPrice = thresholdFactor * startPrice;
 
   const tpBreakpoints = stat[spread ? `${side}_bid_tp_breakpoints` : `${side}_tp_breakpoints`];
   const slBreakpoints = stat[spread ? `${side}_bid_sl_breakpoints` : `${side}_sl_breakpoints`];
-  const tpTouch = firstTouch(tpBreakpoints, (price) => price >= thresholdPrice);
+  const tpTouch = hasTakeProfit ? firstTouch(tpBreakpoints, (price) => price >= thresholdPrice) : null;
   const stopLossPrice = stopLossPercent > 0 ? (stopLossPercent / 100) * startPrice : null;
   const slTouch = stopLossPrice !== null ? firstTouch(slBreakpoints, (price) => price <= stopLossPrice) : null;
 
@@ -375,8 +380,11 @@ function simulateMatchProfit(stat, side, thresholdPercent, stopLossPercent, betA
 // Sums simulateMatchProfit's realized dollar outcome across every eligible
 // match at each threshold — total money made if betAmount had been bet on
 // every filtered match, not an average, so the curve reflects both changing
-// win rate and the shrinking eligible set as the threshold rises.
-function computeDollarCurve(stats, side, stopLossPercent, betAmount, spread = false, feeSim = "none") {
+// win rate and the shrinking eligible set as the threshold rises. Takes the
+// widget's control values as one options object (see updateEvCurveWidget)
+// so each computePoints implementation can pick the knobs it sweeps vs.
+// holds fixed.
+function computeDollarCurve(stats, side, { stopLossPercent, betAmount, spread, feeSim }) {
   const points = [];
   for (let threshold = EV_CURVE_MIN_THRESHOLD; threshold <= EV_CURVE_MAX_THRESHOLD; threshold += EV_CURVE_STEP) {
     let total = 0;
@@ -389,6 +397,30 @@ function computeDollarCurve(stats, side, stopLossPercent, betAmount, spread = fa
     }
     if (n === 0) break;
     points.push({ increase: threshold - EV_CURVE_MIN_THRESHOLD, value: total, n });
+  }
+  return points;
+}
+
+// The stop-loss counterpart of computeDollarCurve: sweeps the stop-loss
+// level from "off" (0) to a hair-trigger 100% of entry, with an optional
+// fixed take-profit, summing each level's realized dollar outcome. No
+// early-out on n — unlike a rising take-profit, a deeper stop-loss never
+// shrinks the eligible set, and with no take-profit set nothing is excluded
+// for unreachability at all (so n runs larger than in the take-profit
+// widgets).
+function computeStopLossDollarCurve(stats, side, { takeProfitPercent, betAmount, spread, feeSim }) {
+  const points = [];
+  for (let stopLoss = 0; stopLoss <= 100; stopLoss += 1) {
+    let total = 0;
+    let n = 0;
+    for (const stat of stats) {
+      const profit = simulateMatchProfit(stat, side, takeProfitPercent, stopLoss, betAmount, spread, feeSim);
+      if (profit === null) continue;
+      total += profit;
+      n++;
+    }
+    if (n === 0) break;
+    points.push({ increase: stopLoss, value: total, n });
   }
   return points;
 }
@@ -688,14 +720,23 @@ function formatEvPercentTick(tick) {
   return `${tick > 0 ? "+" : ""}${Math.round(tick * 100)}%`;
 }
 
+// Default x axis for the EV-curve widgets: the take-profit sweep. The
+// stop-loss-sweep widget swaps in its own via config.xAxis.
+const EV_CURVE_X_AXIS = {
+  max: EV_CURVE_MAX_THRESHOLD - EV_CURVE_MIN_THRESHOLD,
+  tickStep: 100,
+  formatTick: (tick) => `+${tick}%`,
+};
+
 // Clears and redraws the svg (gridlines, axis labels, data line); returns
 // the scales so the hover layer can map pointer position back to a data
 // point. points are { increase, value } — value's unit (percent-of-stake or
-// dollars) is opaque here; formatYTick renders it for the y axis.
-function renderEvChart(svg, points, color, formatYTick = formatEvPercentTick) {
+// dollars) is opaque here; formatYTick renders it for the y axis, and xAxis
+// names the swept variable's domain and tick format.
+function renderEvChart(svg, points, color, formatYTick = formatEvPercentTick, xAxis = EV_CURVE_X_AXIS) {
   svg.innerHTML = "";
   const plot = chartPlotArea();
-  const xDomain = [0, EV_CURVE_MAX_THRESHOLD - EV_CURVE_MIN_THRESHOLD];
+  const xDomain = [0, xAxis.max];
   const values = points.map((p) => p.value);
   const yDataMin = Math.min(...values, 0);
   const yDataMax = Math.max(...values, 0);
@@ -715,9 +756,9 @@ function renderEvChart(svg, points, color, formatYTick = formatEvPercentTick) {
     label.textContent = formatYTick(tick);
     grid.appendChild(label);
   });
-  for (let tick = xDomain[0]; tick <= xDomain[1]; tick += 100) {
+  for (let tick = xDomain[0]; tick <= xDomain[1]; tick += xAxis.tickStep) {
     const label = svgEl("text", { x: xScale(tick), y: plot.bottom + 20, class: "chart-axis-label", "text-anchor": "middle" });
-    label.textContent = `+${tick}%`;
+    label.textContent = xAxis.formatTick(tick);
     grid.appendChild(label);
   }
   svg.appendChild(grid);
@@ -736,7 +777,8 @@ function formatEvPercentTooltip(point) {
 // the nearest sampled point (points are one per integer % so the index IS
 // the increase value), and drives a crosshair + tooltip — see
 // references/interaction.md's "crosshair finds the X" pattern.
-function attachEvChartHover(widget, svg, points, scales, color, tooltip, formatTooltipValue = formatEvPercentTooltip) {
+// formatTooltipTitle names the swept variable for the tooltip's first line.
+function attachEvChartHover(widget, svg, points, scales, color, tooltip, formatTooltipValue = formatEvPercentTooltip, formatTooltipTitle = (point) => `+${point.increase}% max price`) {
   const { xScale, yScale, plot } = scales;
   const crosshair = svgEl("line", { x1: 0, x2: 0, y1: plot.top, y2: plot.bottom, class: "chart-crosshair" });
   const dot = svgEl("circle", { r: 4, class: "chart-hover-dot", fill: color });
@@ -776,7 +818,7 @@ function attachEvChartHover(widget, svg, points, scales, color, tooltip, formatT
     tooltip.hidden = false;
     tooltip.innerHTML = "";
     const line1 = document.createElement("div");
-    line1.textContent = `+${point.increase}% max price`;
+    line1.textContent = formatTooltipTitle(point);
     const line2 = document.createElement("div");
     line2.className = "chart-tooltip-value";
     line2.textContent = formatTooltipValue(point);
@@ -1050,6 +1092,31 @@ function buildStopLossControl(onChange) {
   return { container, slider, label: container.querySelector(".range-label") };
 }
 
+// Mirror of buildStopLossControl for the stop-loss-sweep widget's optional
+// take-profit: sell if price rises to or above entry plus this % increase,
+// with 0 meaning no take-profit at all (the position exits only via the
+// stop-loss or settlement).
+function buildTakeProfitControl(onChange) {
+  const container = document.createElement("div");
+  container.className = "range-control percent-control";
+  container.innerHTML = `
+    <label>Take-profit — sell if price rises to &ge; <span class="range-label"></span> above price at match start</label>
+    <div class="single-range">
+      <div class="single-range-track"></div>
+      <div class="single-range-fill"></div>
+      <input type="range" class="take-profit-slider" min="0" max="${EV_CURVE_MAX_THRESHOLD - EV_CURVE_MIN_THRESHOLD}" step="5" value="0" />
+    </div>
+  `;
+
+  const slider = container.querySelector(".take-profit-slider");
+  slider.addEventListener("input", () => {
+    updateSingleRangeFill(container);
+    onChange();
+  });
+  updateSingleRangeFill(container);
+  return { container, slider, label: container.querySelector(".range-label") };
+}
+
 // Plain dollar-amount input for the dollar-profit EV-curve widget's
 // per-match bet size — styled like buildStopLossControl's percent-control
 // wrapper, just with a typed number instead of a slider.
@@ -1128,6 +1195,9 @@ function buildFeeSimControl(onChange) {
 // computePoints/formatYTick/formatTooltipValue let a config swap in its own
 // point computation and value formatting (see computeDollarCurve and
 // DOLLAR_PROFIT_CONFIG) instead of the default percent-of-stake EV curve.
+// takeProfit, when true, adds a fixed take-profit slider (for configs that
+// sweep the stop-loss instead — see STOP_LOSS_DOLLAR_CONFIG), and
+// xAxis/formatTooltipTitle rename the swept variable's axis and tooltip.
 function buildEvCurveWidget(config) {
   const widget = document.createElement("div");
   widget.className = "widget widget-wide";
@@ -1161,6 +1231,7 @@ function buildEvCurveWidget(config) {
       ? buildDualRangeControl("winprob-range", "Side's win probability at match start", update)
       : null,
     stopLoss: config.stopLoss ? buildStopLossControl(update) : null,
+    takeProfit: config.takeProfit ? buildTakeProfitControl(update) : null,
     betAmount: config.betAmount ? buildBetAmountControl(update) : null,
     spread: config.realisticFill ? buildSpreadControl(update) : null,
     feeSim: config.realisticFill ? buildFeeSimControl(update) : null,
@@ -1168,6 +1239,7 @@ function buildEvCurveWidget(config) {
   rangeControls.appendChild(els.volume.container);
   if (els.winProb) rangeControls.appendChild(els.winProb.container);
   if (els.stopLoss) rangeControls.appendChild(els.stopLoss.container);
+  if (els.takeProfit) rangeControls.appendChild(els.takeProfit.container);
   if (els.betAmount) rangeControls.appendChild(els.betAmount.container);
   if (els.spread) rangeControls.appendChild(els.spread.container);
   if (els.feeSim) rangeControls.appendChild(els.feeSim.container);
@@ -1209,6 +1281,13 @@ function updateEvCurveWidget(widget, els, local, config) {
     els.stopLoss.label.textContent = stopLossPercent === 0 ? "Off" : `${stopLossPercent}%`;
   }
 
+  let takeProfitPercent = null;
+  if (els.takeProfit) {
+    const increase = Number(els.takeProfit.slider.value);
+    if (increase > 0) takeProfitPercent = EV_CURVE_MIN_THRESHOLD + increase;
+    els.takeProfit.label.textContent = increase === 0 ? "Off" : `+${increase}%`;
+  }
+
   if (els.betAmount) {
     local.betAmount = Number(els.betAmount.input.value) || 0;
   }
@@ -1235,9 +1314,10 @@ function updateEvCurveWidget(widget, els, local, config) {
   els.volume.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
   if (els.winProb) els.winProb.rangeSampleSize.textContent = `(n=${pairs.length} match${pairs.length === 1 ? "" : "es"})`;
 
+  const stats = pairs.map((pair) => pair.stat);
   const points = config.computePoints
-    ? config.computePoints(pairs.map((pair) => pair.stat), local.side, stopLossPercent, local.betAmount, local.spread, local.feeSim)
-    : computeEvCurve(pairs.map((pair) => pair.stat), local.side, stopLossPercent);
+    ? config.computePoints(stats, local.side, { stopLossPercent, takeProfitPercent, betAmount: local.betAmount, spread: local.spread, feeSim: local.feeSim })
+    : computeEvCurve(stats, local.side, stopLossPercent);
   if (points.length === 0) {
     showChartMessage(widget, "No matches with usable price data in the current filters.");
     return;
@@ -1247,8 +1327,8 @@ function updateEvCurveWidget(widget, els, local, config) {
   const color = SIDE_COLORS[local.side];
   const formatYTick = config.formatYTick ? (tick) => config.formatYTick(tick, local) : undefined;
   const formatTooltipValue = config.formatTooltipValue ? (point) => config.formatTooltipValue(point, local) : undefined;
-  const scales = renderEvChart(els.svg, points, color, formatYTick);
-  attachEvChartHover(widget, els.svg, points, scales, color, els.tooltip, formatTooltipValue);
+  const scales = renderEvChart(els.svg, points, color, formatYTick, config.xAxis);
+  attachEvChartHover(widget, els.svg, points, scales, color, els.tooltip, formatTooltipValue, config.formatTooltipTitle);
 }
 
 const evCurveWidgetUpdaters = [];
@@ -1287,6 +1367,27 @@ const DOLLAR_PROFIT_CONFIG = {
   betAmount: true,
   realisticFill: true,
   computePoints: computeDollarCurve,
+  formatYTick: (tick) => formatDollars(tick),
+  formatTooltipValue: formatDollarsTooltipValue,
+};
+
+// The stop-loss counterpart of DOLLAR_PROFIT_CONFIG: same filters and
+// realistic-fill simulation, but sweeping the stop-loss level on the x axis
+// (0 = no stop-loss, 100 = sell on any dip below entry) with an optional
+// fixed take-profit as the slider, instead of the other way around.
+const STOP_LOSS_DOLLAR_CONFIG = {
+  id: "widget-sl-curve-dollar",
+  title: "Stop-loss vs. money made (by pre-match volume)",
+  volumeLabel: "Pre-match volume",
+  volumeOf: (pair) => pair.stat.volume_before_start,
+  maxVolume: () => state.maxVolumeBeforeStart,
+  winProbFilter: true,
+  takeProfit: true,
+  betAmount: true,
+  realisticFill: true,
+  computePoints: computeStopLossDollarCurve,
+  xAxis: { max: 100, tickStep: 10, formatTick: (tick) => (tick === 0 ? "off" : `≤${tick}%`) },
+  formatTooltipTitle: (point) => (point.increase === 0 ? "No stop-loss" : `Stop-loss ≤${point.increase}% of entry`),
   formatYTick: (tick) => formatDollars(tick),
   formatTooltipValue: formatDollarsTooltipValue,
 };
@@ -1662,6 +1763,7 @@ async function init() {
   widgets.appendChild(buildEvCurveWidget(TOTAL_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(PRE_MATCH_VOLUME_CONFIG));
   widgets.appendChild(buildEvCurveWidget(DOLLAR_PROFIT_CONFIG));
+  widgets.appendChild(buildEvCurveWidget(STOP_LOSS_DOLLAR_CONFIG));
   widgets.appendChild(buildOptimizerWidget(OPTIMIZER_CONFIG));
   widgets.appendChild(buildOptimizerWidget(BAND_OPTIMIZER_CONFIG));
   applyWidgetOrder(widgets, loadWidgetOrder());
