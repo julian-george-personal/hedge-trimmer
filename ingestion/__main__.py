@@ -17,7 +17,6 @@ REQUIRED_ENV_VARS = ["KALSHI_KEY_ID", "KALSHI_PRIVATE_KEY_PEM", "PANDASCORE_TOKE
 DATA_ROOT = "s3://hedge-trimmer-juliangeorge/kalshi"
 PANDASCORE_DATA_ROOT = "s3://hedge-trimmer-juliangeorge/pandascore"
 
-
 def _require_env() -> dict[str, str]:
     env = {name: os.environ.get(name) for name in REQUIRED_ENV_VARS}
     missing = [name for name, value in env.items() if not value]
