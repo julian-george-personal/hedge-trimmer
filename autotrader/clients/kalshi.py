@@ -25,12 +25,10 @@ def _raise_for_status_with_body(resp: requests.Response) -> None:
     logger.error("Kalshi API error %s %s -> %s: %s", resp.request.method, resp.request.url, resp.status_code, resp.text)
     resp.raise_for_status()
 
-# The exact create-order field names below (ticker/client_order_id/side/
-# action/count/type/yes_price/no_price) match Kalshi's documented v2 shape
-# as of this writing, but weren't re-verified against docs.kalshi.com's live
-# reference during this change (the fetch tool available here couldn't pull
-# it). Confirm against the current API reference before ever calling
-# create_order with armed=True.
+# Kalshi deprecated /portfolio/orders (returns 410 deprecated_v1_order_endpoint
+# as of 2026-08) in favor of /portfolio/events/orders: a single bid/ask order
+# book scoped to the YES leg, fixed-point-decimal count/price strings, and
+# required time_in_force/self_trade_prevention_type fields. See create_order.
 
 
 class KalshiClient:
@@ -105,7 +103,7 @@ class KalshiClient:
         return self.get(f"/portfolio/orders/{order_id}")["order"]
 
     def cancel_order(self, order_id: str) -> dict:
-        return self.delete(f"/portfolio/orders/{order_id}")
+        return self.delete(f"/portfolio/events/orders/{order_id}")
 
     def create_order(
         self,
@@ -117,17 +115,32 @@ class KalshiClient:
         price_cents: int | None = None,
     ) -> dict:
         """side: "yes"|"no". action: "buy"|"sell". order_type: "limit"|"market".
-        price_cents is required for limit orders (1-99), ignored for market
-        orders."""
+        price_cents (1-99, in terms of `side`'s own price) is required for
+        limit orders; ignored for market orders, which use an
+        immediate-or-cancel order at the marketable extreme instead, since
+        v2 has no bare "market order" type.
+
+        v2's order book only has a YES-leg bid/ask, so side+action is
+        translated: buying/selling NO becomes the opposite book side at the
+        complementary price (100 - price_cents)."""
+        book_side = "bid" if action == "buy" else "ask"
+        if side == "no":
+            book_side = "ask" if book_side == "bid" else "bid"
+
+        if order_type == "limit":
+            yes_price_cents = price_cents if side == "yes" else 100 - price_cents
+            time_in_force = "good_till_canceled"
+        else:
+            yes_price_cents = 99 if book_side == "bid" else 1
+            time_in_force = "immediate_or_cancel"
+
         body = {
             "ticker": ticker,
             "client_order_id": str(uuid.uuid4()),
-            "side": side,
-            "action": action,
-            "count": count,
-            "type": order_type,
+            "side": book_side,
+            "count": f"{count:.2f}",
+            "price": f"{yes_price_cents / 100:.2f}",
+            "time_in_force": time_in_force,
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        if order_type == "limit":
-            price_field = "yes_price" if side == "yes" else "no_price"
-            body[price_field] = price_cents
-        return self.post("/portfolio/orders", body)["order"]
+        return self.post("/portfolio/events/orders", body)
