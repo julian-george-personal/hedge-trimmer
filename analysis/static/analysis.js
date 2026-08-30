@@ -575,17 +575,24 @@ async function runOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSi
 // silently turns high thresholds into "hold to expiry" for every
 // high-probability side. This variant partitions matches into
 // win-probability bands and finds each band's own optimal exit instead.
-const BAND_OPTIMIZER_WINPROB_BUCKETS = 6;
+const BAND_OPTIMIZER_BAND_WIDTH = 2.5;
 
-// Contiguous win-probability bands partitioning `pairs` for the band
-// optimizer — quantile-edged (see quantileBreakpoints) so each band starts
-// with roughly equal sample. Bands are [lo, hi), except the last, which
-// includes its upper edge so the max-probability match still lands in a band.
+// Contiguous fixed-width win-probability bands partitioning `pairs` for
+// the band optimizer — BAND_OPTIMIZER_BAND_WIDTH points each, aligned to
+// multiples of the width and spanning the observed range. Fixed widths
+// keep bands comparable across sides, filters, and cached runs (quantile
+// edges would move with the data); sparse edge bands just fall under the
+// per-band sample floor and render as skipped. Bands are [lo, hi), except
+// the last, which includes its upper edge so the max-probability match
+// still lands in a band.
 function winProbBands(pairs, side) {
-  const edges = quantileBreakpoints(pairs.map((p) => p.stat[`${side}_start_price`] * 100), BAND_OPTIMIZER_WINPROB_BUCKETS);
+  const winProbs = pairs.map((p) => p.stat[`${side}_start_price`] * 100);
+  if (winProbs.length === 0) return [];
+  const first = Math.floor(Math.min(...winProbs) / BAND_OPTIMIZER_BAND_WIDTH) * BAND_OPTIMIZER_BAND_WIDTH;
+  const max = Math.max(...winProbs);
   const bands = [];
-  for (let i = 0; i + 1 < edges.length; i++) {
-    bands.push({ lo: edges[i], hi: edges[i + 1], last: i + 2 === edges.length });
+  for (let lo = first; lo < max; lo += BAND_OPTIMIZER_BAND_WIDTH) {
+    bands.push({ lo, hi: lo + BAND_OPTIMIZER_BAND_WIDTH, last: lo + BAND_OPTIMIZER_BAND_WIDTH >= max });
   }
   return bands;
 }
@@ -608,7 +615,7 @@ function bestBandExit(stats, side, betAmount, minSampleSize, spread, feeSim) {
 }
 
 // Like runOptimizer, but instead of one global win-probability range and
-// take-profit threshold, it fixes quantile win-probability bands and finds
+// take-profit threshold, it fixes 2.5%-wide win-probability bands and finds
 // each band's own optimal (stop-loss, take-profit) — the resulting policy
 // reads "if the side's start probability falls in band B, use B's exits;
 // if B's best exit still loses money, don't bet that band at all". The
@@ -833,9 +840,12 @@ function attachEvChartHover(widget, svg, points, scales, color, tooltip, formatT
 
 const EXIT_POLICY_Y_TICKS = [10, 20, 50, 100, 200, 500, 1000, 2000];
 
+function formatWinProbEdge(value) {
+  return Number.isInteger(value) ? `${value}` : value.toFixed(1);
+}
+
 function formatWinProbBand(lo, hi) {
-  const [a, b] = lo.toFixed(0) === hi.toFixed(0) ? [lo.toFixed(1), hi.toFixed(1)] : [lo.toFixed(0), hi.toFixed(0)];
-  return `${a}–${b}%`;
+  return `${formatWinProbEdge(lo)}–${formatWinProbEdge(hi)}%`;
 }
 
 // x positions for one band's marks, inset 1px per side so adjacent bands
@@ -843,6 +853,11 @@ function formatWinProbBand(lo, hi) {
 function bandXBounds(band, xScale) {
   return { x1: xScale(band.lo) + 1, x2: xScale(band.hi) - 1 };
 }
+
+// Below this pixel width, a band gets no in-chart text: 2.5%-wide bands
+// pack too tightly for "+635%"-style labels, so hover and the table carry
+// the exact numbers instead.
+const BAND_LABEL_MIN_WIDTH = 40;
 
 // Draws one profitable band's exit policy: a solid take-profit line, a
 // dashed stop-loss line (when one is set), and a shaded "hold corridor"
@@ -852,30 +867,36 @@ function bandXBounds(band, xScale) {
 function drawBandCorridor(svg, band, xScale, yScale, plotBottom, color) {
   const { x1, x2 } = bandXBounds(band, xScale);
   const mid = (x1 + x2) / 2;
+  const showLabels = x2 - x1 >= BAND_LABEL_MIN_WIDTH;
   const yTp = yScale(band.exit.threshold);
   const hasStop = band.exit.stopLoss > 0;
   const yBottom = hasStop ? yScale(band.exit.stopLoss) : plotBottom;
 
   svg.appendChild(svgEl("rect", { x: x1, y: yTp, width: x2 - x1, height: yBottom - yTp, fill: color, opacity: 0.12 }));
   svg.appendChild(svgEl("line", { x1, x2, y1: yTp, y2: yTp, stroke: color, "stroke-width": 2.5 }));
-  const tpLabel = svgEl("text", { x: mid, y: yTp - 6, class: "chart-band-label", "text-anchor": "middle" });
-  tpLabel.textContent = `+${band.exit.threshold - EV_CURVE_MIN_THRESHOLD}%`;
-  svg.appendChild(tpLabel);
+  if (showLabels) {
+    const tpLabel = svgEl("text", { x: mid, y: yTp - 6, class: "chart-band-label", "text-anchor": "middle" });
+    tpLabel.textContent = `+${band.exit.threshold - EV_CURVE_MIN_THRESHOLD}%`;
+    svg.appendChild(tpLabel);
+  }
 
   if (hasStop) {
     svg.appendChild(svgEl("line", { x1, x2, y1: yBottom, y2: yBottom, stroke: color, "stroke-width": 2, "stroke-dasharray": "5 4" }));
-    const slLabel = svgEl("text", { x: mid, y: yBottom + 13, class: "chart-band-sublabel", "text-anchor": "middle" });
-    slLabel.textContent = `≤${band.exit.stopLoss}%`;
-    svg.appendChild(slLabel);
+    if (showLabels) {
+      const slLabel = svgEl("text", { x: mid, y: yBottom + 13, class: "chart-band-sublabel", "text-anchor": "middle" });
+      slLabel.textContent = `≤${band.exit.stopLoss}%`;
+      svg.appendChild(slLabel);
+    }
   }
 }
 
 // Draws a skipped band (unprofitable at its best, or under the sample
 // floor) as a muted full-height tint with a one-word explanation at the
-// entry line.
+// entry line (dropped when the band is too narrow to fit it).
 function drawBandSkip(svg, band, xScale, yEntry, plot) {
   const { x1, x2 } = bandXBounds(band, xScale);
   svg.appendChild(svgEl("rect", { x: x1, y: plot.top, width: x2 - x1, height: plot.bottom - plot.top, class: "chart-band-skip" }));
+  if (x2 - x1 < BAND_LABEL_MIN_WIDTH) return;
   const label = svgEl("text", { x: (x1 + x2) / 2, y: yEntry - 6, class: "chart-band-sublabel", "text-anchor": "middle" });
   label.textContent = band.exit ? "no bet" : `n=${band.matches}`;
   svg.appendChild(label);
@@ -937,7 +958,7 @@ function renderExitPolicyChart(svg, bands, side) {
     if (x - lastTickX < 30) continue;
     lastTickX = x;
     const label = svgEl("text", { x, y: plot.bottom + 20, class: "chart-axis-label", "text-anchor": "middle" });
-    label.textContent = `${Math.round(edge)}%`;
+    label.textContent = `${formatWinProbEdge(edge)}%`;
     grid.appendChild(label);
   }
   svg.appendChild(grid);
@@ -1404,7 +1425,9 @@ const STOP_LOSS_DOLLAR_CONFIG = {
 // grows as new data lands, so a cache hit is never passed off as fresh:
 // it renders with a banner saying when it was computed and over how many
 // matches, plus a Recalculate button that redoes the search for real.
-const OPTIMIZER_CACHE_VERSION = 1;
+// v2: band optimizer switched from quantile buckets to fixed 2.5% bands —
+// older cached results reflect the old bucketing, so they're ignored.
+const OPTIMIZER_CACHE_VERSION = 2;
 
 function sidebarFiltersCacheable() {
   return (
@@ -1470,7 +1493,7 @@ const OPTIMIZER_CONFIG = {
 const BAND_OPTIMIZER_CONFIG = {
   id: "widget-optimizer-bands",
   title: "Optimal exit policy by win probability (max profit, by pre-match volume)",
-  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into win-probability bands (quantile-edged) and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. Bands whose best exit still loses money are skipped (“no bet”); pre-match volume stays a single shared range; the minimum sample size applies per band. Same grid-search caveats and spread/fee simulation as above.",
+  note: "Like the optimizer above, but instead of one static take-profit threshold it partitions matches into fixed 2.5%-wide win-probability bands and finds each band's own optimal stop-loss and take-profit — a side entered at 45% can never gain more than ~+120% (price caps at $1), so the optimal exit shifts with the starting probability. Bands whose best exit still loses money are skipped (“no bet”); pre-match volume stays a single shared range; the minimum sample size applies per band. Same grid-search caveats and spread/fee simulation as above.",
   run: runBandOptimizer,
   render: renderBandOptimizerResult,
 };
