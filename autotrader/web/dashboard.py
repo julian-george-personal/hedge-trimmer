@@ -74,6 +74,9 @@ _PAGE = """<!doctype html>
   .badge.sell-loss {{ background: rgba(224, 85, 90, 0.12); color: var(--no); }}
   .badge.sell {{ background: rgba(79, 140, 255, 0.15); color: var(--accent); }}
   .reason {{ color: var(--text-dim); }}
+  .dry-run-marker {{ color: var(--warn); cursor: help; }}
+  .return-pos {{ color: var(--yes); }}
+  .return-neg {{ color: var(--no); }}
   details.log-section {{ margin-top: 2rem; }}
   details.log-section summary {{ cursor: pointer; font-weight: 600; font-size: 15px; padding: 0.5rem 0; list-style: none; }}
   details.log-section summary::-webkit-details-marker {{ display: none; }}
@@ -168,14 +171,14 @@ _PAGE = """<!doctype html>
 
 <h2>Positions</h2>
 <table>
-  <tr><th>Match</th><th>Status</th><th>Ticker</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Mode</th></tr>
+  <tr><th>Match</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Return</th><th>Reason</th></tr>
   {position_rows}
 </table>
 
 <details class="log-section">
   <summary>Closed positions <span class="count">({closed_position_count})</span></summary>
   <table>
-    <tr><th>Match</th><th>Status</th><th>Ticker</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Mode</th></tr>
+    <tr><th>Match</th><th>Contracts</th><th>Entry</th><th>Exit</th><th>Return</th><th>Reason</th></tr>
     {closed_position_rows}
   </table>
 </details>
@@ -231,9 +234,12 @@ function autotraderOnArmedToggle(checkbox) {{
 </html>
 """
 
+_DRY_RUN_MARKER = '<span class="dry-run-marker" title="Dry run — no real order was placed">*</span>'
+
 _ROW = (
-    "<tr><td>{event}</td><td>{status}</td><td>{ticker}</td><td>{contracts}</td>"
-    "<td>${entry:.2f}</td><td>{exit}</td><td>{reason}</td><td>{mode}</td></tr>"
+    "<tr><td>{team_name}{dry_run_marker}<br><span class=\"reason\">{ticker}</span></td>"
+    "<td>{contracts}</td>"
+    "<td>${entry:.2f}</td><td>{exit}</td><td>{return_percent}</td><td>{reason}</td></tr>"
 )
 
 _STOP_ICON = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>'
@@ -253,17 +259,27 @@ _DECISION_ROW = (
 )
 
 
+def _return_percent(entry_price: float, exit_price: float | None) -> str:
+    if exit_price is None or not entry_price:
+        return "-"
+    percent = (exit_price - entry_price) / entry_price * 100
+    css_class = "return-pos" if percent >= 0 else "return-neg"
+    return f'<span class="{css_class}">{percent:+.0f}%</span>'
+
+
 def _position_row(position: dict) -> str:
+    entry_price = float(position.get("entry_price_dollars", 0))
     exit_price = position.get("exit_price_dollars")
+    exit_price_float = float(exit_price) if exit_price is not None else None
     return _ROW.format(
-        event=html.escape(position["PK"].removeprefix("POSITION#")),
-        status=html.escape(position.get("status", "")),
+        team_name=html.escape(position.get("team_name") or "-"),
+        dry_run_marker=_DRY_RUN_MARKER if position.get("dry_run", True) else "",
         ticker=html.escape(position.get("ticker", "")),
         contracts=position.get("contracts", ""),
-        entry=float(position.get("entry_price_dollars", 0)),
-        exit=f"${float(exit_price):.2f}" if exit_price is not None else "-",
+        entry=entry_price,
+        exit=f"${exit_price_float:.2f}" if exit_price_float is not None else "-",
+        return_percent=_return_percent(entry_price, exit_price_float),
         reason=html.escape(str(position.get("exit_reason", "-"))),
-        mode="dry-run" if position.get("dry_run", True) else "live",
     )
 
 
@@ -439,9 +455,9 @@ def render_dashboard(
         stop_loss_percent=config.stop_loss_percent,
         take_profit_percent=config.take_profit_percent,
         lead_time_minutes=config.lead_time_minutes,
-        position_rows="".join(_position_row(p) for p in active_positions) or "<tr><td colspan=8>none open</td></tr>",
+        position_rows="".join(_position_row(p) for p in active_positions) or "<tr><td colspan=6>none open</td></tr>",
         closed_position_count=len(closed_positions),
-        closed_position_rows="".join(_position_row(p) for p in closed_positions) or "<tr><td colspan=8>none yet</td></tr>",
+        closed_position_rows="".join(_position_row(p) for p in closed_positions) or "<tr><td colspan=6>none yet</td></tr>",
         trade_count=len(trade_events),
         trade_truncated_note=trade_truncated_note,
         trade_rows="".join(_trade_row(e) for e in shown_trades) or "<tr><td colspan=8>no trades yet</td></tr>",
