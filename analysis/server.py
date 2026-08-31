@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from analysis import polymarket_data
 from analysis.data import get_candles, list_events
 from analysis.pandascore import find_match_start
 from analysis.pre_match_volume import list_pre_match_volume
@@ -14,17 +15,23 @@ from analysis.price_spike import list_price_spike_stats
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PORT = 8420
 
+DATA_SOURCES = {
+    "kalshi": {"list_events": list_events, "get_candles": get_candles},
+    "polymarket": {"list_events": polymarket_data.list_events, "get_candles": polymarket_data.get_candles},
+}
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        source = DATA_SOURCES.get(query.get("source", ["kalshi"])[0], DATA_SOURCES["kalshi"])
         if parsed.path == "/api/events":
-            self._send_json(list_events())
+            self._send_json(source["list_events"]())
         elif parsed.path == "/api/candles":
-            ticker = parse_qs(parsed.query).get("ticker", [""])[0]
-            self._send_json(get_candles(ticker))
+            ticker = query.get("ticker", [""])[0]
+            self._send_json(source["get_candles"](ticker))
         elif parsed.path == "/api/match-start":
-            query = parse_qs(parsed.query)
             event = {"close_time": query.get("close_time", [""])[0], "markets": [{"team_name": t} for t in query.get("team", [])]}
             self._send_json({"begin_at": find_match_start(event)})
         elif parsed.path == "/api/price-spike-stats":

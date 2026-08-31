@@ -177,7 +177,10 @@ function currentSidebarFilters() {
   return {
     query: document.getElementById("analysis-search").value.trim(),
     dateRange: currentDateRange(),
-    onlyPandascoreStart: document.getElementById("only-pandascore-start").checked,
+    // PandaScore match-start matching only exists for Kalshi events — forced
+    // off for Polymarket regardless of the (CSS-hidden) checkbox state, so it
+    // can't zero out every Polymarket event via a never-populated stat.
+    onlyPandascoreStart: getDataSource() === "kalshi" && document.getElementById("only-pandascore-start").checked,
   };
 }
 
@@ -240,6 +243,7 @@ async function loadPriceSpikeStats() {
 }
 
 async function initAnalysis() {
+  setupDataSourceToggle("analysis-data-source");
   const widgets = document.getElementById("widgets");
   widgetBuilders.forEach((build) => widgets.appendChild(build()));
   applyWidgetOrder(widgets, loadWidgetOrder());
@@ -249,7 +253,15 @@ async function initAnalysis() {
   state.events = await loadEvents();
   renderAll();
 
-  loadPriceSpikeStats();
+  // Price-spike stats need bid/ask history, which only Kalshi has — leave
+  // statsByTicker empty and statsLoaded true so widgets relying on it (e.g.
+  // the optimizer) render their normal "no data" state instead of hanging
+  // on "loading" forever.
+  if (getDataSource() === "kalshi") {
+    loadPriceSpikeStats();
+  } else {
+    state.statsLoaded = true;
+  }
 }
 
 // Deferred (rather than called immediately, like explorer.js's init()) so

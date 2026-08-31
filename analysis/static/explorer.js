@@ -456,7 +456,9 @@ async function renderChart(event, matchStartPromise) {
   });
 
   const candlesByMarket = await Promise.all(
-    event.markets.map((market) => fetchJson(`/api/candles?ticker=${encodeURIComponent(market.ticker)}`))
+    event.markets.map((market) =>
+      fetchJson(`/api/candles?ticker=${encodeURIComponent(market.ticker)}&source=${getDataSource()}`)
+    )
   );
 
   await matchStartPromise; // resolves state.matchStartAt (or leaves it null)
@@ -624,6 +626,7 @@ async function loadPreMatchVolume() {
 }
 
 async function init() {
+  setupDataSourceToggle("explorer-data-source");
   state.events = await loadEvents();
   state.maxVolume = Math.max(0, ...state.events.map((event) => event.volume));
 
@@ -648,7 +651,10 @@ async function init() {
   setupSidebarToggle();
   setupSidebarResize();
   setupChartResize();
-  loadPreMatchVolume();
+  // Pre-match volume is derived from a PandaScore match-start reference,
+  // which only exists for Kalshi events — the filter stays hidden (see
+  // explorer.css's [data-source="polymarket"] rule) and permanently disabled.
+  if (getDataSource() === "kalshi") loadPreMatchVolume();
 }
 
 init();

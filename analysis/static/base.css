@@ -65,3 +65,42 @@ body {
 .view[hidden] {
   display: none;
 }
+
+.data-source-toggle {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.data-source-toggle button {
+  flex: 1;
+  padding: 6px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.data-source-toggle button + button {
+  border-left: 1px solid var(--border);
+}
+
+.data-source-toggle button:hover {
+  color: var(--text);
+}
+
+.data-source-toggle button.active {
+  background: rgba(79, 140, 255, 0.15);
+  color: var(--text);
+}
+
+/* Pre-match volume and "only PandaScore match starts" both depend on a
+   PandaScore match-start reference, which only exists for Kalshi events. */
+body[data-source="polymarket"] #pre-match-volume-filter,
+body[data-source="polymarket"] #pandascore-filter {
+  display: none;
+}

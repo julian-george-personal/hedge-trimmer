@@ -4,6 +4,7 @@ import pandas as pd
 
 DEFAULT_DATA_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "raw" / "kalshi")
 DEFAULT_PANDASCORE_DATA_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "raw" / "pandascore")
+DEFAULT_POLYMARKET_DATA_ROOT = str(Path(__file__).resolve().parent.parent / "data" / "raw" / "polymarket")
 
 
 def _is_local(data_root: str) -> bool:
@@ -70,3 +71,19 @@ def write_pandascore_matches(
     matches: list[dict], data_root: str = DEFAULT_PANDASCORE_DATA_ROOT, overwrite: bool = False
 ) -> str:
     return _merge_and_write_parquet(matches, "id", overwrite, data_root, "matches.parquet")
+
+
+def write_polymarket_markets(
+    markets: list[dict], tag_slug: str, data_root: str = DEFAULT_POLYMARKET_DATA_ROOT, overwrite: bool = False
+) -> str:
+    return _merge_and_write_parquet(
+        markets, "id", overwrite, data_root, "markets", f"tag={tag_slug}", "markets.parquet"
+    )
+
+
+def polymarket_candles_exist(market_id: str, data_root: str = DEFAULT_POLYMARKET_DATA_ROOT) -> bool:
+    return _path_exists(_out_path(data_root, "candles", f"market_id={market_id}", "candles.parquet"))
+
+
+def write_polymarket_candles(candles: list[dict], market_id: str, data_root: str = DEFAULT_POLYMARKET_DATA_ROOT) -> str:
+    return _write_parquet(candles, data_root, "candles", f"market_id={market_id}", "candles.parquet")
