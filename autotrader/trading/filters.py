@@ -36,6 +36,19 @@ def quote_price_dollars(market: dict) -> float | None:
     return _market_float(market, "last_price_dollars") or None
 
 
+def exit_quote_price_dollars(market: dict) -> float | None:
+    """Price a held "yes" position could actually be sold at right now (the
+    live bid), not the bid/ask mid. In a thin or one-sided book the ask can
+    sit stale far above a collapsing bid, which makes the mid overstate what
+    a stop-loss/take-profit exit will actually realize — checking the mid
+    against the stop-loss threshold can let a position run well past its
+    configured floor before the check ever notices."""
+    yes_bid = _market_float(market, "yes_bid_dollars")
+    if yes_bid is not None and yes_bid > 0:
+        return yes_bid
+    return _market_float(market, "last_price_dollars") or None
+
+
 def _assign_side(candidate: dict, prices: list[float], side: str) -> int:
     underdog_index = 0 if prices[0] < prices[1] else 1
     overdog_index = 1 - underdog_index

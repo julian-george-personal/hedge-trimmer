@@ -5,7 +5,7 @@ from decimal import Decimal
 from autotrader.clients.kalshi import KalshiClient
 from autotrader.storage.config import TradingConfig
 from autotrader.storage.state import Store
-from autotrader.trading.filters import quote_price_dollars
+from autotrader.trading.filters import exit_quote_price_dollars
 
 logger = logging.getLogger("autotrader.monitor")
 
@@ -72,12 +72,12 @@ def _close_position(
 
 def _close_settled_position(store: Store, event_ticker: str, position: dict, market: dict) -> None:
     """Once a market finalizes, its order book empties out (yes_bid=0,
-    yes_ask=1) and quote_price_dollars's mid-price fallback turns into a
-    meaningless $0.50 that will never cross a stop-loss/take-profit
-    threshold — so a position left open through settlement would otherwise
-    sit "open" in the store forever, even though Kalshi has already
-    auto-settled and paid it out (win or loss, no sell order needed or
-    possible on a finalized market)."""
+    yes_ask=1) and exit_quote_price_dollars falls back to whatever the last
+    trade happened to be before resolution — not necessarily the actual
+    settlement outcome — so a position left open through settlement would
+    otherwise sit "open" in the store forever, even though Kalshi has
+    already auto-settled and paid it out (win or loss, no sell order needed
+    or possible on a finalized market)."""
     settlement_price = float(market["settlement_value_dollars"])
     logger.info(
         "SETTLED %s: %s resolved %s, settled at $%.2f", event_ticker, position["ticker"], market.get("result"), settlement_price
@@ -96,7 +96,7 @@ def check_open_positions(kalshi_client: KalshiClient, store: Store, config: Trad
             _close_settled_position(store, event_ticker, position, market)
             continue
 
-        current_price = quote_price_dollars(market)
+        current_price = exit_quote_price_dollars(market)
         if current_price is None:
             continue
 

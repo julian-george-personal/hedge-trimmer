@@ -13,7 +13,7 @@ _PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>hedge trimmer - dashboard</title>
+<title>hedge trimmer dashboard</title>
 <style>
   :root {{
     --bg: #ffffff;

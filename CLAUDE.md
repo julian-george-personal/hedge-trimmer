@@ -118,21 +118,36 @@ Files:
   fetch shared by both views so it only ever runs once per page load.
 - `explorer.js` / `explorer.css` — the match explorer (sidebar list +
   chart). `explorer.js`'s body is wrapped in an IIFE.
-- `analysis.js` / `analysis.css` — ad hoc analysis widgets. Also
-  IIFE-wrapped.
+- `analysis-core.js` / `analysis-core.css` — the analysis view's shared
+  infrastructure: sidebar state/filters, the widget grid's
+  drag-to-reorder/persistence, generic formatters, and the generic
+  widget-shell/form-control CSS classes. Loaded as a plain script (like
+  `shared.js`), not IIFE-wrapped, since widget files need direct access to
+  its names (`state`, `sidebarFilteredEvents`, `registerWidget`, etc).
+- `widget-<name>.js` / `widget-<name>.css` — one analysis widget each (e.g.
+  `widget-optimizer.js`). Each JS file is IIFE-wrapped so its internal
+  helpers don't leak into the global scope shared with
+  `analysis-core.js`/other widgets, and calls `registerWidget(buildFn)` at
+  load time to add itself to the widget grid — see the comment at the top
+  of `analysis-core.js` for the exact contract. **To delete a widget:**
+  delete its `widget-<name>.js`/`.css` files and their `<script>`/`<link>`
+  tags from `index.html` — nothing else references it. **To add one:**
+  create the two files following that pattern and add the two tags.
 - `base.css` — CSS vars, body reset, top nav bar, and the `.view`/
   `.view[hidden]` rules that drive the view toggle (`.view` is `display:
   contents` so the visible one's child participates directly in
   `.page-body`'s flex layout).
 
-`explorer.js` and `analysis.js` both load in the same document now (as
-plain scripts, not modules), so any top-level `const`/`function` name used
-in both would collide — that's why each is IIFE-wrapped rather than
-deduplicated. They already duplicate several identically-named helpers
-(`state`, `formatVolume`, `sliderPositionToVolume`, `currentDateRange`,
-`applyDatePreset`, etc, some flagged by comments) — that duplication is
-intentional/existing, not something to clean up as a side effect of an
-unrelated change.
+`explorer.js` and the analysis-view scripts all load in the same document
+now (as plain scripts, not modules), so any top-level `const`/`function`
+name used in more than one non-IIFE-wrapped file would collide — that's why
+`explorer.js` and each `widget-*.js` are IIFE-wrapped, while `shared.js` and
+`analysis-core.js` (truly shared, cross-file by design) are not.
+`explorer.js` and `analysis-core.js` still duplicate several
+identically-named helpers (`state`, `formatVolume`, `currentDateRange`,
+`applyDatePreset`, etc, some flagged by comments) since they're two
+independently scoped views — that duplication is intentional/existing, not
+something to clean up as a side effect of an unrelated change.
 
 Both views also had colliding element ids from when they were separate
 documents (`app`, `sidebar`, `search`, `search-bar`, `date-filter`,

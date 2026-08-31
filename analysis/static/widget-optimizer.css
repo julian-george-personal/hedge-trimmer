@@ -1,0 +1,167 @@
+/* Styles specific to the "optimal filter combination" widget
+   (widget-optimizer.js). Shared widget-shell/control classes (.widget,
+   .side-toggle, .percent-control, .range-controls, ...) live in
+   analysis-core.css. */
+
+.optimizer-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.optimizer-run-button {
+  padding: 8px 16px;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.optimizer-run-button:hover {
+  filter: brightness(1.1);
+}
+
+.optimizer-run-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.optimizer-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.optimizer-progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.optimizer-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.1s linear;
+}
+
+.optimizer-progress-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  min-width: 32px;
+}
+
+.optimizer-status {
+  margin-top: 16px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.optimizer-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.optimizer-results:not(:empty) {
+  margin-top: 16px;
+}
+
+.optimizer-result-card {
+  position: relative;
+  padding: 16px 40px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.optimizer-result-delete {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.optimizer-result-delete:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.optimizer-result-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.optimizer-result-card .result-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.optimizer-result-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.optimizer-result-filters .result-label {
+  margin-right: 4px;
+  margin-bottom: 0;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.optimizer-result-headline .result-value {
+  font-size: 28px;
+  font-weight: 600;
+}
+
+.optimizer-result-headline .result-value.positive {
+  color: var(--yes);
+}
+
+.optimizer-result-headline .result-value.negative {
+  color: var(--no);
+}
+
+.optimizer-result-headline .result-detail {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.optimizer-result-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.optimizer-result-item .result-value {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.optimizer-note {
+  margin: 14px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
