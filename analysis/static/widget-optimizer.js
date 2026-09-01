@@ -125,7 +125,16 @@ function quantileBreakpoints(values, buckets) {
 // in Infinity — still includes every match at or above it under a `<=`
 // filter, while keeping the reported range an actual, meaningful number
 // (matters for win probability, which is already bounded to 0-100%).
+//
+// A single breakpoint means every underlying value was identical (e.g.
+// Polymarket's volume_before_start, always 0 with no per-minute volume
+// ingested — see analysis/polymarket_data.py) — pair it with itself rather
+// than returning no ranges at all, since [v, v] still correctly matches
+// every value under that same `>= min && <= max` filter. Without this, that
+// one degenerate dimension zeroes out the entire grid search regardless of
+// how much real data every other dimension has.
 function rangePairsFromBreakpoints(breakpoints) {
+  if (breakpoints.length === 1) return [[breakpoints[0], breakpoints[0]]];
   const pairs = [];
   for (let i = 0; i < breakpoints.length; i++) {
     for (let j = i + 1; j < breakpoints.length; j++) {
@@ -193,6 +202,12 @@ async function runOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSi
   const winProbBreakpoints = quantileBreakpoints(pairs.map((p) => p.stat[`${side}_start_price`] * 100), OPTIMIZER_WINPROB_BUCKETS);
   const volumeRanges = rangePairsFromBreakpoints(volumeBreakpoints);
   const winProbRanges = rangePairsFromBreakpoints(winProbBreakpoints);
+  // A single breakpoint (see rangePairsFromBreakpoints) means every match had
+  // the exact same value — for pre-match volume that's Polymarket's uniform
+  // 0 (no per-minute volume ingested), not a genuinely optimal "$0 – $0"
+  // range the search discovered. Recorded so the result card can say "no
+  // data" instead of presenting a fake range as a real finding.
+  const hasVolumeData = volumeBreakpoints.length > 1;
   const stopLossValues = [];
   for (let s = 0; s <= 100; s += OPTIMIZER_STOPLOSS_STEP) stopLossValues.push(s);
 
@@ -221,7 +236,7 @@ async function runOptimizer(pairs, side, betAmount, minSampleSize, spread, feeSi
         for (const stopLoss of stopLossValues) {
           const point = bestDollarPoint(stats, side, stopLoss, betAmount, spread, feeSim, minSampleSize);
           if (point && (!best || point.returnPct > best.returnPct)) {
-            best = { minVolume, maxVolume, minWinProb, maxWinProb, stopLoss, threshold: point.threshold, value: point.value, returnPct: point.returnPct, n: point.n };
+            best = { minVolume, maxVolume, minWinProb, maxWinProb, stopLoss, threshold: point.threshold, value: point.value, returnPct: point.returnPct, n: point.n, hasVolumeData };
           }
         }
       }
@@ -382,8 +397,23 @@ function buildOptimizerWidget() {
     <p class="optimizer-note">${OPTIMIZER_CONFIG.note}</p>
   `;
 
-  const local = { side: "underdog", runToken: 0 };
   const rangeControls = widget.querySelector(".range-controls");
+
+  // Polymarket has no historical bid/ask (see analysis/polymarket_data.py),
+  // so its price-spike stats set bid=ask=mid — the backtest still runs (mid-
+  // price fills, using the real price path), but the realistic-spread toggle
+  // below can't do anything with that source: ask-entry/bid-exit collapses
+  // to the same numbers as the plain mid fill. Say so up front rather than
+  // let the toggle silently appear to have no effect.
+  if (getDataSource() !== "kalshi") {
+    const sourceNote = document.createElement("p");
+    sourceNote.className = "optimizer-note";
+    sourceNote.textContent =
+      "Polymarket has no historical bid/ask data, so this runs on mid-price fills only (real price path, naive execution at the last traded price) — the \"realistic spread\" option below has no effect for this source.";
+    widget.querySelector(".widget-header").after(sourceNote);
+  }
+
+  const local = { side: "underdog", runToken: 0 };
   const runButton = widget.querySelector(".optimizer-run-button");
   const statusEl = widget.querySelector(".optimizer-status");
   const resultsEl = widget.querySelector(".optimizer-results");
@@ -401,6 +431,7 @@ function buildOptimizerWidget() {
     feeSim: buildFeeSimControl(() => {}),
   };
   rangeControls.append(els.betAmount.container, els.sampleSize.container, els.spread.container, els.feeSim.container);
+  if (getDataSource() !== "kalshi") els.spread.checkbox.disabled = true;
 
   widget.querySelectorAll(".side-toggle button").forEach((button) => {
     button.addEventListener("click", () => {
@@ -524,7 +555,7 @@ function renderOptimizerResultBody(bodyEl, best, params, minSampleSize, totalMat
       <div class="result-detail">${best.value >= 0 ? "+" : ""}${formatDollars(best.value)} total profit, n=${best.n} of ${totalMatches} matches in the current sidebar filters</div>
     </div>
     <div class="optimizer-result-grid">
-      ${item("Pre-match volume", `${formatVolume(best.minVolume)} – ${formatVolume(best.maxVolume)}`)}
+      ${item("Pre-match volume", best.hasVolumeData ? `${formatVolume(best.minVolume)} – ${formatVolume(best.maxVolume)}` : "N/A — no per-minute volume data for this source")}
       ${item("Win probability at start", `${best.minWinProb.toFixed(0)}% – ${best.maxWinProb.toFixed(0)}%`)}
       ${item("Stop-loss", best.stopLoss === 0 ? "Off" : `≤ ${best.stopLoss}% of start price`)}
       ${item("Take-profit (max price)", `+${best.threshold - OPTIMIZER_MIN_THRESHOLD}%`)}

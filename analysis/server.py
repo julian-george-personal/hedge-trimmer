@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from analysis import polymarket_data
 from analysis.data import get_candles, list_events
-from analysis.pandascore import find_match_start
+from analysis.pandascore import find_match_start, list_match_starts
 from analysis.pre_match_volume import list_pre_match_volume
 from analysis.price_spike import list_price_spike_stats
 
@@ -16,8 +16,16 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 PORT = 8420
 
 DATA_SOURCES = {
-    "kalshi": {"list_events": list_events, "get_candles": get_candles},
-    "polymarket": {"list_events": polymarket_data.list_events, "get_candles": polymarket_data.get_candles},
+    "kalshi": {
+        "list_events": list_events,
+        "get_candles": get_candles,
+        "list_price_spike_stats": list_price_spike_stats,
+    },
+    "polymarket": {
+        "list_events": polymarket_data.list_events,
+        "get_candles": polymarket_data.get_candles,
+        "list_price_spike_stats": polymarket_data.list_price_spike_stats,
+    },
 }
 
 
@@ -34,8 +42,10 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/match-start":
             event = {"close_time": query.get("close_time", [""])[0], "markets": [{"team_name": t} for t in query.get("team", [])]}
             self._send_json({"begin_at": find_match_start(event)})
+        elif parsed.path == "/api/match-starts":
+            self._send_json(list_match_starts(source["list_events"]()))
         elif parsed.path == "/api/price-spike-stats":
-            self._send_json(list_price_spike_stats())
+            self._send_json(source["list_price_spike_stats"]())
         elif parsed.path == "/api/pre-match-volume":
             self._send_json(list_pre_match_volume())
         else:

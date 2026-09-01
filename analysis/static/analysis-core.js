@@ -18,6 +18,7 @@ const state = {
   events: [],
   statsByTicker: new Map(),
   statsLoaded: false,
+  matchStartByTicker: new Map(),
 };
 
 const WIDGET_ORDER_COOKIE = "widget-order";
@@ -163,11 +164,12 @@ function applyDatePreset(preset) {
   renderAll();
 }
 
-// True only once stats have loaded and this match's price-spike stat was
-// computed from a real PandaScore begin_at, not the 2h-before-close fallback
-// (see has_pandascore_start in price_spike.py).
+// True once a PandaScore match was found for this event — backed by
+// /api/match-starts (see loadMatchStarts), not the price-spike stats, since
+// that lookup only needs team names + close time and works for any source's
+// events, unlike price-spike's bid/ask-dependent math.
 function eventHasPandascoreStart(event) {
-  return state.statsByTicker.get(event.event_ticker)?.has_pandascore_start === true;
+  return state.matchStartByTicker.has(event.event_ticker);
 }
 
 // The sidebar's current filter inputs, read together so a caller that needs
@@ -177,10 +179,7 @@ function currentSidebarFilters() {
   return {
     query: document.getElementById("analysis-search").value.trim(),
     dateRange: currentDateRange(),
-    // PandaScore match-start matching only exists for Kalshi events — forced
-    // off for Polymarket regardless of the (CSS-hidden) checkbox state, so it
-    // can't zero out every Polymarket event via a never-populated stat.
-    onlyPandascoreStart: getDataSource() === "kalshi" && document.getElementById("only-pandascore-start").checked,
+    onlyPandascoreStart: document.getElementById("only-pandascore-start").checked,
   };
 }
 
@@ -236,9 +235,15 @@ function setupFilters() {
 }
 
 async function loadPriceSpikeStats() {
-  const stats = await fetchJson("/api/price-spike-stats");
+  const stats = await fetchJson(`/api/price-spike-stats?source=${getDataSource()}`);
   state.statsByTicker = new Map(stats.map((stat) => [stat.event_ticker, stat]));
   state.statsLoaded = true;
+  renderAll();
+}
+
+async function loadMatchStarts() {
+  const startByTicker = await fetchJson(`/api/match-starts?source=${getDataSource()}`);
+  state.matchStartByTicker = new Map(Object.entries(startByTicker));
   renderAll();
 }
 
@@ -253,15 +258,8 @@ async function initAnalysis() {
   state.events = await loadEvents();
   renderAll();
 
-  // Price-spike stats need bid/ask history, which only Kalshi has — leave
-  // statsByTicker empty and statsLoaded true so widgets relying on it (e.g.
-  // the optimizer) render their normal "no data" state instead of hanging
-  // on "loading" forever.
-  if (getDataSource() === "kalshi") {
-    loadPriceSpikeStats();
-  } else {
-    state.statsLoaded = true;
-  }
+  loadMatchStarts();
+  loadPriceSpikeStats();
 }
 
 // Deferred (rather than called immediately, like explorer.js's init()) so

@@ -44,9 +44,11 @@ def _team_pair_index() -> dict[frozenset, list[dict]]:
 
 
 def find_match_start(event: dict) -> str | None:
-    """Look up the PandaScore begin_at for the CS2 match backing this Kalshi
-    event, matched by team-name pair against the bulk-ingested S3 dataset.
-    Returns an ISO 8601 timestamp, or None if no match is found."""
+    """Look up the PandaScore begin_at for the CS2 match backing this event,
+    matched by team-name pair against the bulk-ingested S3 dataset. Works for
+    any event shaped like Kalshi's (markets: [{team_name}], close_time) —
+    Polymarket's list_events() is built to match that shape for exactly this
+    reason. Returns an ISO 8601 timestamp, or None if no match is found."""
     team_names = [_normalize_team_name(m["team_name"]) for m in event["markets"]]
     if len(team_names) != 2:
         return None
@@ -58,3 +60,18 @@ def find_match_start(event: dict) -> str | None:
 
     close_time = _parse_iso(event["close_time"])
     return _closest_to(candidates, close_time)["begin_at"]
+
+
+def list_match_starts(events: list[dict]) -> dict[str, str]:
+    """begin_at per event_ticker, omitting events with no PandaScore match
+    found. Decoupled from price_spike.py's per-event stats (which also carry
+    a has_pandascore_start flag) because that computation additionally
+    requires Kalshi-only bid/ask history — this needs only find_match_start,
+    so it works for any source's events and is what the analysis view's
+    "only PandaScore match starts" filter actually needs."""
+    starts = {}
+    for event in events:
+        begin_at = find_match_start(event)
+        if begin_at is not None:
+            starts[event["event_ticker"]] = begin_at
+    return starts

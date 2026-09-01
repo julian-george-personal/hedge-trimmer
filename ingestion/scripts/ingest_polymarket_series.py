@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from ingestion.clients.polymarket import PolymarketClient
 from ingestion.extract.polymarket_candles import fetch_price_history, market_price_token
 from ingestion.extract.polymarket_markets import fetch_closed_markets
+from ingestion.extract.polymarket_trades import fetch_trades, merge_trade_volume
 from ingestion.load.parquet_store import (
     DEFAULT_POLYMARKET_DATA_ROOT,
     polymarket_candles_exist,
@@ -72,6 +73,8 @@ def ingest_candles_for_market(client: PolymarketClient, market: dict, data_root:
     start_ts = _parse_ts(market["startDate"])
     end_ts = _parse_ts(market.get("closedTime") or market["endDate"])
     candles = fetch_price_history(client, token_id, start_ts, end_ts)
+    trades = fetch_trades(client, market["conditionId"])
+    candles = merge_trade_volume(candles, trades)
     write_polymarket_candles(candles, market_id, data_root)
     return len(candles)
 

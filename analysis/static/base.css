@@ -98,9 +98,9 @@ body {
   color: var(--text);
 }
 
-/* Pre-match volume and "only PandaScore match starts" both depend on a
-   PandaScore match-start reference, which only exists for Kalshi events. */
-body[data-source="polymarket"] #pre-match-volume-filter,
-body[data-source="polymarket"] #pandascore-filter {
+/* Pre-match volume needs Polymarket's per-minute candle volume, which isn't
+   ingested (see analysis/polymarket_data.py) — "only PandaScore match
+   starts" works fine for Polymarket (see /api/match-starts) and stays shown. */
+body[data-source="polymarket"] #pre-match-volume-filter {
   display: none;
 }

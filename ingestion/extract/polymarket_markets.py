@@ -1,34 +1,32 @@
+import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from ingestion.clients.polymarket import PolymarketClient
 
 EVENT_PAGE_SIZE = 100
 
-# Gamma's /events 422s once offset gets deep enough (observed failure at
-# offset=2100 querying an 11-month window in one go) — some undocumented
-# pagination-depth limit, not a rate limit. Querying in day-sized windows
-# instead keeps each query's page count small (a busy day is ~600-700 events
-# across all tag_slug=counter-strike-2 markets, ~6-7 pages) and comfortably
-# under that limit, at the cost of more (cheap, discovery-only) requests.
-DISCOVERY_WINDOW_SECONDS = 24 * 60 * 60
+# Gamma's /events DOES filter server-side on start_date_min/start_date_max —
+# but only as bare YYYY-MM-DD dates; the same params with a full ISO
+# timestamp (e.g. "2025-12-01T00:00:00Z") are silently ignored, which is what
+# made this look broken in earlier testing (see project_polymarket_ingestion
+# _scoping memory — needs correcting there too). Without this filter, /events
+# pages newest-first with no way to skip straight to an old date, so a query
+# for months-old history has to page through every event back to today first
+# — that's what was actually causing the offset=2100 422s, not "querying too
+# large a single window" as first suspected.
+#
+# Still chunked by week (not sent as one multi-month query) because the
+# filtered result set itself can exceed Gamma's pagination-depth limit over a
+# long enough range (~70 events/day observed recently * 30 days ≈ 2100,
+# right at the wall) — a week keeps every chunk comfortably under it even if
+# density triples.
+DISCOVERY_WINDOW_DAYS = 7
 WINDOW_RETRY_ATTEMPTS = 3
 WINDOW_RETRY_BACKOFF_SECONDS = 5
 
 
-def _parse_ts(iso_string: str) -> int:
-    return int(datetime.fromisoformat(iso_string.replace("Z", "+00:00")).timestamp())
-
-
-def _fetch_closed_events_window(
-    client: PolymarketClient, tag_slug: str, min_start_ts: int, max_start_ts: int
-) -> list[dict]:
-    """Gamma's /events has no working server-side date-range filter (startDateMin/Max
-    and start_date_min/max are both silently ignored), so this pages newest-first and
-    stops once a page's events fall entirely before min_start_ts — the client-side
-    equivalent of Kalshi's server-side min_close_ts/max_close_ts filtering. Callers
-    keep [min_start_ts, max_start_ts) narrow (see DISCOVERY_WINDOW_SECONDS) to avoid
-    Gamma's pagination-depth limit."""
+def _fetch_closed_events_window(client: PolymarketClient, tag_slug: str, start_date_min: str, start_date_max: str) -> list[dict]:
     events: list[dict] = []
     offset = 0
     while True:
@@ -37,25 +35,16 @@ def _fetch_closed_events_window(
             params={
                 "tag_slug": tag_slug,
                 "closed": "true",
+                "start_date_min": start_date_min,
+                "start_date_max": start_date_max,
                 "limit": EVENT_PAGE_SIZE,
                 "offset": offset,
-                "order": "startDate",
-                "ascending": "false",
             },
         )
         if not page:
             break
-
-        page_had_in_range = False
-        for event in page:
-            start_ts = _parse_ts(event["startDate"])
-            if start_ts < min_start_ts:
-                continue
-            page_had_in_range = True
-            if start_ts <= max_start_ts:
-                events.append(event)
-
-        if not page_had_in_range:
+        events.extend(page)
+        if len(page) < EVENT_PAGE_SIZE:
             break
         offset += EVENT_PAGE_SIZE
     return events
@@ -63,12 +52,15 @@ def _fetch_closed_events_window(
 
 def fetch_closed_events(client: PolymarketClient, tag_slug: str, min_start_ts: int, max_start_ts: int) -> list[dict]:
     events: list[dict] = []
-    window_start = min_start_ts
-    while window_start < max_start_ts:
-        window_end = min(window_start + DISCOVERY_WINDOW_SECONDS, max_start_ts)
+    window_start = datetime.fromtimestamp(min_start_ts, tz=timezone.utc).date()
+    end = datetime.fromtimestamp(max_start_ts, tz=timezone.utc).date()
+    while window_start <= end:
+        window_end = min(window_start + timedelta(days=DISCOVERY_WINDOW_DAYS), end + timedelta(days=1))
         for attempt in range(1, WINDOW_RETRY_ATTEMPTS + 1):
             try:
-                events.extend(_fetch_closed_events_window(client, tag_slug, window_start, window_end))
+                events.extend(
+                    _fetch_closed_events_window(client, tag_slug, window_start.isoformat(), window_end.isoformat())
+                )
                 break
             except Exception as exc:
                 if attempt == WINDOW_RETRY_ATTEMPTS:
@@ -89,11 +81,25 @@ def _is_match_moneyline(market: dict, markets_in_event: int) -> bool:
     older events, which instead carry exactly one market per event with
     nothing else to disambiguate it from, and also on tournament-outright
     events ("Will X win the tournament?", one Yes/No market per team, no
-    single winner-take-all market to flag)."""
+    single winner-take-all market to flag).
+
+    The single-market fallback also wrongly caught single-market Yes/No
+    futures/prop questions under the same tag ("Will Team Falcons win an S
+    tier event in 2026?", "Will BC.Game make a roster move before May?") —
+    found live in a full backfill: these run for months (one had 199,549
+    ingested price points, ~138 days at 1-minute fidelity) rather than a
+    match's few hours, both wasting massive ingestion time and polluting the
+    explorer with nonsense "matches" between teams named "Yes" and "No".
+    Every genuine head-to-head market's outcomes are the two real team
+    names; a literal ["Yes", "No"] pair is never one, so it's excluded here
+    even when markets_in_event == 1."""
     sports_market_type = market.get("sportsMarketType")
     if sports_market_type is not None:
         return sports_market_type == "moneyline"
-    return markets_in_event == 1
+    if markets_in_event != 1:
+        return False
+    outcomes = json.loads(market.get("outcomes") or "[]")
+    return [o.strip().lower() for o in outcomes] != ["yes", "no"]
 
 
 def flatten_markets(events: list[dict]) -> list[dict]:
